@@ -1,0 +1,21 @@
+*.npy
+*.npz
+*.png
+*.zip
+*.pkl
+*.tex
+__pycache__/
+models/
+logs/
+runs/
+wandb/
+
+# Mac OS
+.DS_Store
+
+# Python Environments
+.venv/
+env/
+venv/
+.idea/
+.vscode/
