@@ -1,139 +1,135 @@
-# 🤖 MURMAIL: Multi-Agent Imitation Learning & Emergent Communication
+# MURMAIL & Emergent Communication in Multi-Agent RL 🤖🗣️
 
-Questo repository contiene l'implementazione di **MURMAIL** (Maximum Uncertainty Response Multi-Agent Imitation Learning) applicato all'ambiente **Simple Speaker Listener** di PettingZoo (MPE).
+This repository contains the implementation of **MURMAIL (Maximum Uncertainty Response Multi-Agent Imitation Learning)** applied to a **Speaker-Listener** environment.
 
-Il progetto si concentra su due obiettivi principali:
-1.  **Emergent Communication:** Forzare la creazione di un protocollo linguistico discreto e robusto tra agenti (A, B, C -> Rosso, Verde, Blu) evitando "cheat" come l'uso del padding.
-2.  **Imitation Learning:** Utilizzare MURMAIL per apprendere l'Equilibrio di Nash partendo dalle dimostrazioni di un esperto PPO.
+The project consists of two main phases:
 
-![Language Matrix](discrete_language_matrix_extended.png)
-*Figura: Matrice di confusione del linguaggio emerso dopo il training con Signal Jamming. Diagonale perfetta = Comunicazione corretta.*
+1. **Emergent Communication:** Training a PPO Expert to develop a discrete language protocol (Grounding: Word A -> Red, Word B -> Green, Word C -> Blue) while preventing "cheating" strategies (silence/padding abuse) via **Signal Jamming**.
+2. **Imitation Learning:** Comparing **MURMAIL** against **Behavioral Cloning (BC)** in learning the Nash Equilibrium policy from the expert demonstrations.
 
 ---
 
-## ✨ Features Principali
+## 📊 Key Results
 
-### 1. Robust Emergent Communication 🗣️
-Per risolvere il problema del "Padding Cheating" (dove lo speaker usava il silenzio per comunicare), è stata implementata una strategia avanzata:
-* **Signal Jamming Wrapper:** Un wrapper personalizzato che intercetta le azioni di padding (silenzio) dello speaker e le sostituisce con rumore casuale, rendendo il canale inaffidabile.
-* **Entropy Annealing:** Schedulazione lineare dell'entropia (da 0.20 a 0.01) per forzare l'esplorazione iniziale delle parole discrete.
-* **Disentanglement:** Risultato finale con mappatura 1-a-1 tra Colori (Target) e Parole (Messaggi).
+### 1. Emergent Language (The Expert)
 
-### 2. MURMAIL Algorithm 🧠
-Implementazione dell'algoritmo MURMAIL per giochi a somma zero:
-* **Inner Loop RL:** Utilizzo di **UCB-VI** (Upper Confidence Bound Value Iteration) per massimizzare l'incertezza.
-* **Synthetic Rewards:** Costruzione di reward basate sull'accordo con la policy dell'esperto.
-* **Mirror Descent:** Aggiornamento delle policy tramite Exponentiated Gradient.
+We successfully forced the agents to learn a **compositional discrete language**. By using **Entropy Annealing** and a custom **Signal Jamming Wrapper**, we prevented the agents from using "Padding" (silence) to communicate, achieving a perfect diagonal mapping.
 
-### 3. High Performance Engineering ⚡
-* **Numba JIT Compilation:** Caricamento e ricostruzione ultra-veloce delle dinamiche di transizione (`fast_loader.py`).
-* **WandB Integration:** Logging completo di metriche, loss e gradienti.
-* **Automated Pipeline:** Script bash `pipeline.sh` per gestire l'intero ciclo di vita dell'esperimento.
+*Figure 1: Confusion Matrix showing perfect disentanglement. Target Red → Word B, Target Green → Word C, Target Blue → Word A (Padding is unused).*
+
+### 2. Imitation Learning Performance
+
+Comparison between **MURMAIL** (ours) and **Behavioral Cloning** (baseline) in terms of Exploitability (Nash Gap).
+
+*(Run the pipeline to generate `comparison_bc_vs_murmail.png`)*
 
 ---
 
-## 🚀 Installazione
+## 🛠️ Installation
 
-Assicurati di avere Python 3.10+ installato.
+### Prerequisites
+
+* Python 3.8+
+* [WandB Account](https://www.google.com/search?q=https://wandb.ai/) (for logging)
+
+### Setup
 
 ```bash
-# Clona il repository
-git clone [https://github.com/IL-TUO-USERNAME/MARL.git](https://github.com/IL-TUO-USERNAME/MARL.git)
-cd MARL
+# Clone the repository
+git clone https://github.com/YOUR_USERNAME/MARL-Emergent-Communication.git
+cd MARL-Emergent-Communication
 
-# Crea un ambiente virtuale
+# Create a virtual environment (optional but recommended)
 python -m venv venv
-source venv/bin/activate  # Su Windows: venv\Scripts\activate
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Installa le dipendenze
-pip install -r requirements.txt
-Requisiti principali
+# Install dependencies
+pip install numpy matplotlib seaborn gymnasium pettingzoo supersuit stable-baselines3 wandb tqdm numba
 
-pettingzoo[mpe]
+```
 
-stable-baselines3
+---
 
-supersuit
+## 🚀 Usage (The Pipeline)
 
-wandb
+The entire experiment is automated via the `pipeline.sh` script. This script handles training, extraction, estimation, and comparison.
 
-numba
-
-seaborn
-
-🛠️ Utilizzo (Pipeline)
-L'intero esperimento può essere riprodotto eseguendo lo script della pipeline. Questo script gestisce in sequenza: Training dell'esperto, Estrazione dati, Stima dinamiche, Baseline BC e MURMAIL.
-
-Bash
+```bash
 chmod +x pipeline.sh
 ./pipeline.sh
-Step della Pipeline:
 
-Training Esperto (PPO): Addestra lo Speaker-Listener con Signal Jamming per generare un linguaggio perfetto.
+```
 
-Policy Extraction: Converte la rete neurale PPO in policy tabellari per gli stati visitati.
+### Pipeline Steps Breakdown:
 
-Dynamics Estimation: Stima empiricamente la matrice di transizione P(s 
-′
- ∣s,a 
-1
-​	
- ,a 
-2
-​	
- ) e reward R.
+1. **Train PPO Expert (`train_expert.py`):**
+Trains the Speaker-Listener pair using PPO. Uses **Entropy Annealing** (starts high, ends low) and **Signal Jamming** (replaces padding actions with noise) to force robust communication.
+2. **Extract Policies (`extract_expert.py`):**
+Converts the deep RL model (neural network) into a tabular policy representation by sampling trajectories.
+3. **Estimate Dynamics (`estimate_dynamics.py`):**
+Empirically estimates the transition matrix  and reward function  of the environment for the inner-loop solvers.
+4. **Run Baselines (`run_bc_baseline.py`):**
+Runs **Multi-Agent Behavioral Cloning** to establish a baseline performance.
+5. **Run MURMAIL (`run_murmail.py`):**
+Executes the MURMAIL algorithm. It uses **UCB-VI** in the inner loop to find uncertainty-maximizing responses.
+6. **Compare Results (`compare_results.py`):**
+Generates plots and a LaTeX table comparing the final exploitability of BC vs MURMAIL.
 
-Behavioral Cloning (Baseline): Esegue una baseline di BC standard.
+---
 
-Run MURMAIL: Esegue l'algoritmo principale.
+## 🧠 Algorithms Implemented
 
-Confronto: Genera grafici comparativi (comparison_bc_vs_murmail.png).
+### MURMAIL (Maximum Uncertainty Response Multi-Agent Imitation Learning)
 
-📂 Struttura del Progetto
-Core Algorithms:
+Implemented in `murmail.py`.
 
-murmail.py: Implementazione della classe MaxUncertaintyResponseImitationLearning.
+* **Core Idea:** Learns a Nash Equilibrium from expert data without assuming the expert is perfectly optimal.
+* **Mechanism:** Uses an inner loop to solve an induced MDP with exploration bonuses (uncertainty), followed by a Mirror Descent update step.
+* **Reward:** Synthetic reward based on expert agreement: .
 
-innerloop_rl.py: Implementazione di UCBVI per il loop interno.
+### UCB-VI (Inner Loop Solver)
 
-behavior_cloning.py: Baseline Multi-Agent Behavioral Cloning.
+Implemented in `innerloop_rl.py`.
 
-Training & Environment:
+* Used within MURMAIL to solve the single-player induced MDPs efficiently.
 
-train_ppo.py: Script di training dell'esperto con PPO, Entropy Annealing e Wrapper personalizzati.
+### Multi-Agent Behavioral Cloning
 
-env_wrappers.py: Wrapper per visualizzazione e test.
+Implemented in `behavior_cloning.py`.
 
-fast_loader.py: Caricamento ottimizzato con Numba.
+* Standard Maximum Likelihood Estimation baseline.
 
-Analysis:
+---
 
-analyze_language.py: Genera la matrice di confusione del linguaggio (Heatmap).
+## 📂 Project Structure
 
-compare_results.py: Confronta le curve di convergenza (Nash Gap).
+| File | Description |
+| --- | --- |
+| `pipeline.sh` | Main execution script |
+| `murmail.py` | Implementation of the MURMAIL algorithm |
+| `behavior_cloning.py` | Implementation of the BC baseline |
+| `train_expert.py` | (Expected) Script to train PPO with Signal Jamming |
+| `extract_expert.py` | Extracts tabular policies from PPO models |
+| `estimate_dynamics.py` | Estimates env dynamics/rewards via sampling |
+| `innerloop_rl.py` | UCB-VI implementation for MURMAIL's inner loop |
+| `fast_loader.py` | Numba-accelerated loader for heavy matrices |
+| `analyze_language.py` | Generates confusion matrices to verify language emergence |
+| `compare_results.py` | Plotting and analysis tools |
+| `env_wrappers.py` | Visualization script for the trained environment |
 
-extract_expert.py: Estrae le policy dall'agente RL.
+---
 
-📊 Risultati Attesi
-Dopo l'esecuzione della pipeline, troverai nella root:
+## 📈 Optimization
 
-discrete_language_matrix_extended.png: La prova che il linguaggio è emerso correttamente senza cheat.
+* **Numba JIT:** Used in `fast_loader.py` to accelerate the loading and processing of large transition matrices ().
+* **Sparse Dynamics:** Dynamics are estimated using sparse dictionaries and converted to dense arrays only when necessary to manage memory.
 
-comparison_bc_vs_murmail.png: Grafico che mostra come MURMAIL riduce l'exploitability (Nash Gap) rispetto a BC.
+---
 
-results_table.tex: Tabella LaTeX con i risultati numerici finali.
+## 👥 Credits & References
 
-👥 Credits
-Sviluppato per il corso di Distributed AI - Università di Modena e Reggio Emilia.
+* **PettingZoo:** For the Multi-Agent Particle Environment (MPE).
+* **Stable Baselines 3:** For the PPO implementation.
+* **WandB:** For experiment tracking.
 
-
-### Cosa fare ora:
-1.  Crea un file chiamato `README.md` nella cartella principale del tuo progetto.
-2.  Incolla il testo qui sopra.
-3.  Sostituisci `https://github.com/IL-TUO-USERNAME/MARL.git` con il link vero del tuo repo.
-4.  Fai:
-    ```bash
-    git add README.md
-    git commit -m "Add project documentation"
-    git push
-    ```
+*Project developed for the Distributed AI course.*
