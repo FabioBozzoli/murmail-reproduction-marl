@@ -1,153 +1,330 @@
-import gymnasium as gym
-from pettingzoo.mpe import simple_speaker_listener_v4
-import supersuit as ss
-from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import VecMonitor, VecNormalize
-from stable_baselines3.common.callbacks import BaseCallback, CallbackList 
-import wandb
-from wandb.integration.sb3 import WandbCallback
-import os
+"""
+baseline_iql.py - Independent Q-Learning Baseline
+
+Confronto con MURMAIL:
+- Usa stesso ambiente (bins=6)
+- Training indipendente speaker + listener
+- Metriche: gap, reward, sample efficiency
+"""
+
 import numpy as np
-from pettingzoo.utils.wrappers import BaseParallelWrapper
+import matplotlib.pyplot as plt
+from collections import defaultdict, deque
+import pickle
+import time
 
-# --- CONFIGURAZIONE ---
-# NOTA: Abbiamo rimosso NUM_CPUS perché useremo un singolo processo 
-# (più stabile con le versioni attuali delle librerie)
-TOTAL_TIMESTEPS = 2000000  
-LEARNING_RATE = 3e-4
-START_ENTROPY = 0.60       
-END_ENTROPY = 0.05       
-PROJECT_NAME = "MARL_Fixed"
-RUN_NAME = "ppo_jamming_normalized"
+from pettingzoo.mpe import simple_speaker_listener_v4
+from discrete_wrapper import DiscretizedSpeakerListenerWrapper
+from utils import calc_exploitability_true
 
-class SignalJammingWrapper(BaseParallelWrapper):
-    def __init__(self, env):
-        super().__init__(env)
-        self.rng = np.random.default_rng()
+# ============= CONFIG =============
+DISCRETIZATION_BINS = 6
+NUM_EPISODES = 50000        # ~1M samples (20 steps × 50k eps)
+LEARNING_RATE = 0.001
+GAMMA = 0.9
+EPSILON_START = 1.0
+EPSILON_END = 0.05
+EPSILON_DECAY = 0.9995
 
-    def step(self, actions):
-        # Dizionario per accumulare le penalità
-        penalties = {agent: 0.0 for agent in self.env.possible_agents}
+EVAL_EVERY = 2000           # Episodes
+TARGET_UPDATE = 500
+
+print("="*70)
+print("🤖 INDEPENDENT Q-LEARNING BASELINE")
+print("="*70)
+print(f"✓ Environment: Speaker-Listener, bins={DISCRETIZATION_BINS}")
+print(f"✓ Episodes: {NUM_EPISODES}")
+print(f"✓ Estimated time: 60-90 minutes")
+print("="*70)
+
+# ============= ENVIRONMENT =============
+raw_env = simple_speaker_listener_v4.parallel_env(
+    continuous_actions=False,
+    render_mode=None,
+    max_cycles=25
+)
+env = DiscretizedSpeakerListenerWrapper(raw_env, bins=DISCRETIZATION_BINS)
+
+NUM_LISTENER_STATES = 27 * (DISCRETIZATION_BINS ** 2)
+S_SPEAKER = 3  # goal states
+S_LISTENER = NUM_LISTENER_STATES
+A_SPEAKER = 3
+A_LISTENER = 5
+
+print(f"\n📊 State/Action Space:")
+print(f"   Speaker: {S_SPEAKER} states, {A_SPEAKER} actions")
+print(f"   Listener: {S_LISTENER} states, {A_LISTENER} actions")
+
+# ============= Q-TABLES =============
+# Separate Q-tables for each agent
+Q_speaker = np.zeros((S_SPEAKER, A_SPEAKER))
+Q_listener = np.zeros((S_LISTENER, A_LISTENER))
+
+# Target networks for stability
+Q_speaker_target = Q_speaker.copy()
+Q_listener_target = Q_listener.copy()
+
+# ============= EPSILON-GREEDY =============
+def select_action(state, Q_table, epsilon, n_actions):
+    """Epsilon-greedy action selection."""
+    if np.random.random() < epsilon:
+        return np.random.randint(n_actions)
+    else:
+        return np.argmax(Q_table[state])
+
+# ============= Q-LEARNING UPDATE =============
+def update_q_table(Q, Q_target, state, action, reward, next_state, done, lr, gamma):
+    """Standard Q-learning update."""
+    if done:
+        target = reward
+    else:
+        target = reward + gamma * np.max(Q_target[next_state])
+    
+    Q[state, action] += lr * (target - Q[state, action])
+
+# ============= EVALUATION =============
+def evaluate_policy(env, Q_speaker, Q_listener, n_episodes=100):
+    """Evaluate learned policy and compute Nash gap."""
+    total_reward = 0
+    
+    for _ in range(n_episodes):
+        obs, _ = env.reset()
+        done = False
+        episode_reward = 0
         
-        if 'speaker_0' in actions:
-            act = actions['speaker_0']
-            # Se l'azione è illegale (Padding 3 o 4)
-            if act >= 3:
-                # 1. SOSTITUZIONE: Cambia l'azione in rumore (0, 1, 2)
-                # Questo rompe la comunicazione
-                actions['speaker_0'] = self.rng.integers(0, 3)
-                
-                # 2. PUNIZIONE: Assegna una penalità negativa forte
-                # Questo insegna all'agente a NON PROVARCI NEMMENO
-                penalties['speaker_0'] = -5.0 
-                
-                # (Opzionale) Puniamo anche il listener per scoraggiare la coppia? 
-                # Per ora puniamo solo chi commette l'errore (lo speaker).
-
-        # Esegui lo step nell'ambiente reale
-        obs, rews, terms, truncs, infos = self.env.step(actions)
+        while not done:
+            s_spk = obs["speaker_0"]
+            s_lst = obs["listener_0"]
+            
+            # Greedy actions
+            a_spk = np.argmax(Q_speaker[s_spk])
+            a_lst = np.argmax(Q_listener[s_lst])
+            
+            actions = {"speaker_0": a_spk, "listener_0": a_lst}
+            obs, rewards, terms, truncs, _ = env.step(actions)
+            
+            episode_reward += rewards["speaker_0"]
+            done = any(terms.values()) or any(truncs.values())
         
-        # Applica la penalità al reward restituito dall'ambiente
-        for agent, penalty in penalties.items():
-            if agent in rews:
-                rews[agent] += penalty
-                
-        return obs, rews, terms, truncs, infos
-
-class EntropyCallback(BaseCallback):
-    def __init__(self, start_ent: float, end_ent: float, total_timesteps: int, verbose=0):
-        super(EntropyCallback, self).__init__(verbose)
-        self.start_ent = start_ent
-        self.end_ent = end_ent
-        self.total_timesteps = total_timesteps
-
-    def _on_step(self) -> bool:
-        progress = self.num_timesteps / self.total_timesteps
-        current_ent = self.start_ent - (progress * (self.start_ent - self.end_ent))
-        current_ent = max(self.end_ent, current_ent)
-        self.model.ent_coef = current_ent
-        return True
-
-def make_env():
-    env = simple_speaker_listener_v4.parallel_env(render_mode=None, 
-                                                  continuous_actions=False)
+        total_reward += episode_reward
     
-    # PRIMA crei i canali 3 e 4
-    env = ss.pad_observations_v0(env)
-    env = ss.pad_action_space_v0(env)
+    avg_reward = total_reward / n_episodes
     
-    # POI applichi il wrapper che li controlla
-    env = SignalJammingWrapper(env)  # <--- Qui entra in gioco la penalità
+    # Convert Q-tables to policies
+    pi_speaker = np.zeros((S_SPEAKER, A_SPEAKER))
+    pi_listener = np.zeros((S_LISTENER, A_LISTENER))
     
-    env = ss.pettingzoo_env_to_vec_env_v1(env)
+    for s in range(S_SPEAKER):
+        best_a = np.argmax(Q_speaker[s])
+        pi_speaker[s, best_a] = 1.0
     
-    # 5. Concatenazione "Dummy" (Cruciale per compatibilità versioni!)
-    # num_cpus=0 forza l'uso del processo principale (niente errori Async)
-    # num_vec_envs=1 mantiene un singolo ambiente ma "pulisce" l'interfaccia per SB3
-    env = ss.concat_vec_envs_v1(
-        env, 
-        num_vec_envs=1, 
-        num_cpus=0, 
-        base_class='stable_baselines3'
-    )
+    for s in range(S_LISTENER):
+        best_a = np.argmax(Q_listener[s])
+        pi_listener[s, best_a] = 1.0
     
-    # 6. Monitor e Normalizzazione
-    env = VecMonitor(env)
-    env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.)
+    # Expand speaker policy to joint state space
+    S_joint = S_SPEAKER * S_LISTENER
+    pi_speaker_joint = np.zeros((S_joint, A_SPEAKER))
+    pi_listener_joint = np.zeros((S_joint, A_LISTENER))
     
-    return env
-
-if __name__ == "__main__":
-    # Assicuriamoci che le cartelle esistano
-    os.makedirs(f"models/{RUN_NAME}", exist_ok=True)
-    os.makedirs(f"runs/{RUN_NAME}", exist_ok=True)
+    for s_spk in range(S_SPEAKER):
+        for s_lst in range(S_LISTENER):
+            s_joint = s_spk * S_LISTENER + s_lst
+            pi_speaker_joint[s_joint] = pi_speaker[s_spk]
+            pi_listener_joint[s_joint] = pi_listener[s_lst]
     
-    wandb.init(
-        entity="307972-unimore", 
-        project=PROJECT_NAME,
-        name=RUN_NAME,
-        sync_tensorboard=True, 
-        monitor_gym=True,
-        config={
-            "method": "Signal Jamming + VecNormalize",
-            "learning_rate": LEARNING_RATE
-        }
-    )
-
-    env = make_env()
-
-    model = PPO(
-        "MlpPolicy",
-        env,
-        verbose=1,
-        learning_rate=LEARNING_RATE,
-        n_steps=2048,         # Aumentato n_steps standard per compensare la mancanza di parallelelismo
-        batch_size=256,       
-        ent_coef=START_ENTROPY, 
-        tensorboard_log=f"runs/{RUN_NAME}"
-    )
-
-    entropy_cb = EntropyCallback(START_ENTROPY, END_ENTROPY, TOTAL_TIMESTEPS)
-    wandb_cb = WandbCallback(
-        gradient_save_freq=10000, 
-        model_save_path=f"models/{RUN_NAME}", 
-        verbose=2
-    )
-
-    print(f"🚀 Inizio addestramento '{RUN_NAME}' (Single Process + Normalized)...")
-    
+    # Compute Nash gap (requires P, R)
     try:
-        model.learn(
-            total_timesteps=TOTAL_TIMESTEPS,
-            callback=CallbackList([entropy_cb, wandb_cb])
-        )
-    except KeyboardInterrupt:
-        print("Interrotto dall'utente, salvataggio in corso...")
-
-    # Salvataggio finale
-    model.save(f"models/{RUN_NAME}/final_model")
-    env.save(f"models/{RUN_NAME}/vec_normalize.pkl") # Salva le statistiche di normalizzazione!
+        P = np.load('P_bins6.npy').astype(np.float64)
+        R = np.load('R_bins6.npy').astype(np.float64)
+        init_dist = np.load('expert_initial_dist_bins6.npy').astype(np.float64)
+        
+        gap = calc_exploitability_true(pi_speaker_joint, pi_listener_joint, R, P, init_dist, GAMMA)
+    except:
+        gap = None
     
-    print("✅ Modello salvato.")
-    env.close()
-    wandb.finish()
+    return avg_reward, gap
+
+# ============= TRAINING =============
+print("\n🚀 Starting Training...")
+
+epsilon = EPSILON_START
+episode_rewards = []
+eval_episodes = []
+eval_gaps = []
+eval_rewards = []
+
+start_time = time.time()
+
+for episode in range(NUM_EPISODES):
+    obs, _ = env.reset()
+    done = False
+    episode_reward = 0
+    steps = 0
+    
+    while not done and steps < 50:
+        s_spk = obs["speaker_0"]
+        s_lst = obs["listener_0"]
+        
+        # Select actions
+        a_spk = select_action(s_spk, Q_speaker, epsilon, A_SPEAKER)
+        a_lst = select_action(s_lst, Q_listener, epsilon, A_LISTENER)
+        
+        actions = {"speaker_0": a_spk, "listener_0": a_lst}
+        next_obs, rewards, terms, truncs, _ = env.step(actions)
+        
+        ns_spk = next_obs["speaker_0"]
+        ns_lst = next_obs["listener_0"]
+        
+        done = any(terms.values()) or any(truncs.values())
+        
+        # Update Q-tables independently
+        update_q_table(Q_speaker, Q_speaker_target, s_spk, a_spk, 
+                      rewards["speaker_0"], ns_spk, done, LEARNING_RATE, GAMMA)
+        
+        update_q_table(Q_listener, Q_listener_target, s_lst, a_lst,
+                      rewards["listener_0"], ns_lst, done, LEARNING_RATE, GAMMA)
+        
+        obs = next_obs
+        episode_reward += rewards["speaker_0"]
+        steps += 1
+    
+    episode_rewards.append(episode_reward)
+    
+    # Decay epsilon
+    epsilon = max(EPSILON_END, epsilon * EPSILON_DECAY)
+    
+    # Update target networks
+    if episode % TARGET_UPDATE == 0:
+        Q_speaker_target = Q_speaker.copy()
+        Q_listener_target = Q_listener.copy()
+    
+    # Evaluation
+    if (episode + 1) % EVAL_EVERY == 0:
+        avg_reward, gap = evaluate_policy(env, Q_speaker, Q_listener)
+        eval_episodes.append(episode + 1)
+        eval_rewards.append(avg_reward)
+        eval_gaps.append(gap)
+        
+        elapsed = time.time() - start_time
+        print(f"Episode {episode+1:6d} | Reward: {avg_reward:6.3f} | Gap: {gap:.6f if gap else 'N/A'} | ε: {epsilon:.3f} | Time: {elapsed/60:.1f}m")
+
+env.close()
+
+total_time = time.time() - start_time
+
+print(f"\n✅ Training Complete in {total_time/60:.1f} minutes")
+print(f"   Final reward: {eval_rewards[-1]:.3f}")
+print(f"   Final gap: {eval_gaps[-1]:.6f}")
+
+# ============= COMPARISON WITH MURMAIL =============
+print("\n📊 COMPARISON WITH MURMAIL:")
+
+# Load MURMAIL results
+try:
+    with open('murmail_results_bins6.pkl', 'rb') as f:
+        murmail_results = pickle.load(f)
+    
+    print("\n   MURMAIL:")
+    print(f"      Queries: {murmail_results['queries'][-1]}")
+    print(f"      Final gap: {murmail_results['exploit'][-1]:.6f}")
+    print(f"      Initial gap: {murmail_results['exploit'][0]:.6f}")
+    print(f"      Improvement: {murmail_results['exploit'][0] - murmail_results['exploit'][-1]:.6f}")
+    
+    print("\n   IQL:")
+    print(f"      Episodes: {NUM_EPISODES}")
+    print(f"      Samples: ~{NUM_EPISODES * 20}")
+    print(f"      Final gap: {eval_gaps[-1]:.6f}")
+    print(f"      Initial gap: {eval_gaps[0]:.6f}")
+    print(f"      Improvement: {eval_gaps[0] - eval_gaps[-1]:.6f}")
+    
+    # Sample efficiency comparison
+    murmail_samples = murmail_results['queries'][-1]
+    iql_samples = NUM_EPISODES * 20
+    
+    print(f"\n   Sample Efficiency:")
+    print(f"      MURMAIL: {murmail_samples} samples → gap {murmail_results['exploit'][-1]:.6f}")
+    print(f"      IQL: {iql_samples} samples → gap {eval_gaps[-1]:.6f}")
+    print(f"      IQL uses {iql_samples/murmail_samples:.1f}x more samples")
+    
+except Exception as e:
+    print(f"   Could not load MURMAIL results: {e}")
+
+# ============= PLOT =============
+fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+# Plot 1: Learning curve (reward)
+ax = axes[0, 0]
+window = 100
+smoothed = np.convolve(episode_rewards, np.ones(window)/window, mode='valid')
+ax.plot(smoothed)
+ax.set_xlabel('Episode')
+ax.set_ylabel('Average Reward')
+ax.set_title('IQL Learning Curve')
+ax.grid(True, alpha=0.3)
+
+# Plot 2: Nash gap over time
+ax = axes[0, 1]
+ax.plot(eval_episodes, eval_gaps, 'o-', markersize=4)
+ax.set_xlabel('Episode')
+ax.set_ylabel('Nash Gap')
+ax.set_title('IQL Convergence (Gap)')
+ax.grid(True, alpha=0.3)
+
+# Plot 3: Comparison with MURMAIL (gap)
+ax = axes[1, 0]
+try:
+    # Convert episodes to samples for fair comparison
+    iql_samples = np.array(eval_episodes) * 20
+    ax.plot(iql_samples, eval_gaps, 'o-', label='IQL', markersize=4)
+    ax.plot(murmail_results['queries'], murmail_results['exploit'], 's-', label='MURMAIL', markersize=4)
+    ax.set_xlabel('Environment Samples')
+    ax.set_ylabel('Nash Gap')
+    ax.set_title('IQL vs MURMAIL (Sample Efficiency)')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+except:
+    ax.text(0.5, 0.5, 'MURMAIL data not available', ha='center', va='center')
+
+# Plot 4: Final comparison
+ax = axes[1, 1]
+try:
+    methods = ['MURMAIL', 'IQL']
+    final_gaps = [murmail_results['exploit'][-1], eval_gaps[-1]]
+    colors = ['green', 'blue']
+    ax.bar(methods, final_gaps, color=colors, alpha=0.7)
+    ax.set_ylabel('Final Nash Gap')
+    ax.set_title('Final Performance Comparison')
+    ax.axhline(y=murmail_results['config']['expert_gap'], color='red', linestyle='--', label='Expert')
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+except:
+    pass
+
+plt.tight_layout()
+plt.savefig('iql_vs_murmail_comparison.png', dpi=150)
+print("\n📊 Plot saved: iql_vs_murmail_comparison.png")
+
+# ============= SAVE RESULTS =============
+results = {
+    'eval_episodes': eval_episodes,
+    'eval_gaps': eval_gaps,
+    'eval_rewards': eval_rewards,
+    'episode_rewards': episode_rewards,
+    'Q_speaker': Q_speaker,
+    'Q_listener': Q_listener,
+    'config': {
+        'num_episodes': NUM_EPISODES,
+        'learning_rate': LEARNING_RATE,
+        'gamma': GAMMA,
+        'bins': DISCRETIZATION_BINS
+    }
+}
+
+with open('iql_results_bins6.pkl', 'wb') as f:
+    pickle.dump(results, f)
+
+print("💾 Results saved: iql_results_bins6.pkl")
+print("\n" + "="*70)
+print("✅ BASELINE COMPLETE!")
+print("="*70)

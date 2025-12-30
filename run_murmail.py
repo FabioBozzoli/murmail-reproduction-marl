@@ -1,135 +1,158 @@
 """
-Run MURMAIL algorithm on Speaker-Listener environment.
-FIXED: Loads sparse dynamics from pickle and sanitizes inputs.
+run_murmail_FIXED.py - Carica P e R dal pickle originale
 """
 
 import numpy as np
-from murmail import MaxUncertaintyResponseImitationLearning
-from innerloop_rl import UCBVI
-from utils import calc_exploitability_true
-import matplotlib.pyplot as plt
 import pickle
-import os
-from fast_loader import load_expert_and_dynamics
+import time
+import matplotlib.pyplot as plt
+from numba import jit, prange
 
-def run_murmail_experiment(num_iterations=1000, gamma=0.9, learning_rate=10.0):
-    """Run MURMAIL algorithm."""
-    print("🚀 Running MURMAIL Algorithm...")
-    
-    expert_speaker, expert_listener, transitions, rewards, initial_dist = load_expert_and_dynamics()
-    
-    num_states = expert_speaker.shape[0]
-    num_actions = expert_speaker.shape[1]
-    
-    # Initialize inner loop RL algorithm
-    # Riduciamo horizon e episodes per velocità, dato che lo spazio è 2048 stati
-    inner_algo = UCBVI(
-        num_episodes=20,   
-        horizon=10         
-    )
-    
-    game_params = {
-        'num_states': num_states,
-        'num_actions_p1': num_actions,
-        'num_actions_p2': num_actions,
-        'num_actions': num_actions
-    }
-    
-    # Initialize MURMAIL
-    murmail = MaxUncertaintyResponseImitationLearning(
-        num_iterations=num_iterations,
-        transitions=transitions,
-        expert_policies=(expert_speaker, expert_listener),
-        innerloop_algo=inner_algo,
-        learning_rate=learning_rate,
-        gamma=gamma,
-        eval_freq=50,  # Evaluate every 50 iterations
-        true_rewards=rewards,
-        initial_dist=initial_dist,
-        game_params=game_params,
-        rollout_length=100,
-        expert_samples=10
-    )
-    
-    # Run algorithm
-    queries, exploitability, policy_speaker, policy_listener = murmail.run()
-    
-    # Final evaluation
-    final_exploit = calc_exploitability_true(
-        policy_speaker, policy_listener,
-        rewards, transitions, initial_dist, gamma
-    )
-    
-    print(f"\n✅ MURMAIL Results:")
-    print(f"  - Final exploitability: {final_exploit:.4f}")
-    print(f"  - Total iterations: {num_iterations}")
-    
-    return {
-        'queries': queries,
-        'exploitability': exploitability,
-        'final_policies': (policy_speaker, policy_listener),
-        'final_exploit': final_exploit
-    }
+from murmail import MaxUncertaintyResponseImitationLearning
+from utils import calc_exploitability_true
 
-def plot_murmail_results(results, save_path='murmail_results.png'):
-    """Plot MURMAIL learning curve."""
-    plt.figure(figsize=(10, 6))
-    plt.plot(results['queries'], results['exploitability'],
-             label='MURMAIL', color='blue', linewidth=2)
-    plt.xlabel('Iterations / Queries', fontsize=12)
-    plt.ylabel('Nash Gap (Exploitability)', fontsize=12)
-    plt.title('MURMAIL on Speaker-Listener', fontsize=14)
-    plt.legend(fontsize=11)
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300)
-    print(f"\n📊 Saved plot to {save_path}")
+# ============= LOAD =============
+print("📂 Loading data...")
 
-def main():
-    """Run MURMAIL experiments with hyperparameter tuning."""
-    
-    # Grid search over learning rates
-    learning_rates = [1.0, 5.0, 10.0] # Rimosso 20.0 per risparmiare tempo
-    best_result = None
-    best_lr = None
-    best_exploit = float('inf')
-    
-    for lr in learning_rates:
-        print(f"\n{'='*60}")
-        print(f"Testing learning_rate = {lr}")
-        print(f"{'='*60}")
-        
-        try:
-            results = run_murmail_experiment(
-                num_iterations=500, # Ridotto a 500 per test veloce
-                gamma=0.9,
-                learning_rate=lr
-            )
-            
-            if results['final_exploit'] < best_exploit:
-                best_exploit = results['final_exploit']
-                best_lr = lr
-                best_result = results
-        
-        except Exception as e:
-            print(f"❌ Failed with lr={lr}: {e}")
-            import traceback
-            traceback.print_exc()
-            continue
-    
-    print(f"\n🏆 Best learning rate: {best_lr} (exploitability: {best_exploit:.4f})")
-    
-    # Save best results
-    if best_result:
-        plot_murmail_results(best_result)
-        
-        np.savez('murmail_results.npz',
-                 queries=best_result['queries'],
-                 exploitability=best_result['exploitability'],
-                 final_exploit=best_result['final_exploit'],
-                 best_lr=best_lr)
-        
-        print("\n💾 Saved results to murmail_results.npz")
+pi_s = np.load('expert_policy_speaker_bins6.npy')
+pi_l = np.load('expert_policy_listener_bins6.npy')
+init_dist = np.load('expert_initial_dist_bins6.npy')
 
-if __name__ == "__main__":
-    main()
+# *** LOAD P, R DIRETTAMENTE DAL GENERATE SCRIPT ***
+# Opzione 1: Se hai salvato P, R
+try:
+    P = np.load('P_bins6.npy').astype(np.float64)
+    R = np.load('R_bins6.npy').astype(np.float64)
+    print("✓ Loaded pre-built P, R")
+except FileNotFoundError:
+    print("❌ P_bins6.npy not found!")
+    print("   Devi rigenerare con generate_expert_ROBUST.py modificato")
+    print("   O usa il workaround sotto")
+    exit(1)
+
+S = P.shape[0]
+A_SPEAKER = P.shape[1]
+A_LISTENER = P.shape[2]
+
+print(f"✓ P: {P.shape}, R: {R.shape}")
+print(f"✓ States: {S}, Actions: μ={A_SPEAKER}, ν={A_LISTENER}")
+
+# ============= FAST VI =============
+@jit(nopython=True, cache=True, parallel=True)
+def _fast_vi(P_ats, R, gamma, tol=1e-8, max_iter=200):
+    A, S, _ = P_ats.shape
+    V = np.zeros(S, dtype=np.float64)
+    
+    for iteration in range(max_iter):
+        V_old = V.copy()
+        Q = np.zeros((A, S), dtype=np.float64)
+        
+        for a in prange(A):
+            for s in range(S):
+                Q[a, s] = R[s]
+                for sp in range(S):
+                    Q[a, s] += gamma * P_ats[a, s, sp] * V_old[sp]
+        
+        for s in prange(S):
+            max_val = Q[0, s]
+            for a in range(1, A):
+                if Q[a, s] > max_val:
+                    max_val = Q[a, s]
+            V[s] = max_val
+        
+        max_diff = 0.0
+        for s in range(S):
+            diff = abs(V[s] - V_old[s])
+            if diff > max_diff:
+                max_diff = diff
+        
+        if max_diff < tol:
+            break
+    
+    pi = np.zeros((S, A), dtype=np.float64)
+    for s in range(S):
+        best_a = 0
+        best_q = Q[0, s]
+        for a in range(1, A):
+            if Q[a, s] > best_q:
+                best_q = Q[a, s]
+                best_a = a
+        pi[s, best_a] = 1.0
+    
+    return V, pi
+
+class FastVISolver:
+    def run_algo(self, P, R_in, params, gamma):
+        P_ats = np.ascontiguousarray(np.transpose(P, (1, 0, 2)))
+        R = R_in.mean(axis=1) if R_in.ndim > 1 else R_in
+        return _fast_vi(P_ats, R, gamma)
+
+# ============= VALIDATE =============
+print("\n🔍 Validation...")
+gap_expert = calc_exploitability_true(pi_s, pi_l, R, P, init_dist, 0.9)
+print(f"   Expert gap: {gap_expert:.6f}")
+
+mu_unif = np.ones((S, A_SPEAKER), dtype=np.float64) / A_SPEAKER
+nu_unif = np.ones((S, A_LISTENER), dtype=np.float64) / A_LISTENER
+gap_uniform = calc_exploitability_true(mu_unif, nu_unif, R, P, init_dist, 0.9)
+print(f"   Uniform gap: {gap_uniform:.6f}")
+print(f"   Ratio: {gap_uniform/gap_expert:.1f}x")
+
+if gap_expert > 0.1:
+    print("\n⚠️  WARNING: Expert gap alto! Verifica generazione.")
+    response = input("   Continuare comunque? (y/n): ")
+    if response.lower() != 'y':
+        exit(0)
+
+# ============= MURMAIL =============
+print("\n🚀 MURMAIL...")
+
+game_params = {'num_states': S, 'num_actions': max(A_SPEAKER, A_LISTENER)}
+
+murmail = MaxUncertaintyResponseImitationLearning(
+    num_iterations=200000,
+    transitions=P,
+    expert_policies=(pi_s, pi_l),
+    innerloop_algo=FastVISolver(),
+    learning_rate=500.0,
+    gamma=0.9,
+    eval_freq=10000,
+    true_rewards=R,
+    initial_dist=init_dist,
+    rollout_length=50,
+    expert_samples=20,
+    game_params=game_params
+)
+
+start = time.time()
+queries, exploit, p_s, p_l = murmail.run(batch_size=1000)
+elapsed = time.time() - start
+
+print(f"\n✅ Done in {elapsed/60:.1f} min")
+print(f"\n📊 RESULTS:")
+print(f"   Initial:  {exploit[0]:.6f}")
+print(f"   Final:    {exploit[-1]:.6f}")
+print(f"   Improve:  {exploit[0] - exploit[-1]:.6f}")
+
+# ============= PLOT =============
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+ax1.semilogy(queries, exploit, 'o-', linewidth=2, markersize=4)
+ax1.axhline(y=gap_expert, color='green', linestyle='--', label=f'Expert ({gap_expert:.4f})')
+ax1.set_xlabel('Queries')
+ax1.set_ylabel('Gap (log)')
+ax1.set_title('MURMAIL Convergence')
+ax1.legend()
+ax1.grid(True, alpha=0.3)
+
+ax2.plot(queries, exploit, 'o-', linewidth=2, markersize=4)
+ax2.axhline(y=gap_expert, color='green', linestyle='--', label=f'Expert ({gap_expert:.4f})')
+ax2.set_xlabel('Queries')
+ax2.set_ylabel('Gap')
+ax2.set_title('Linear Scale')
+ax2.legend()
+ax2.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('murmail_convergence_bins6.png', dpi=150)
+print("\n📊 Plot saved")

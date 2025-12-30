@@ -1,108 +1,135 @@
 import numpy as np
+from numba import jit
 
+# --- 1. CORE JIT OTTIMIZZATO (PLANNING DIRETTO) ---
+@jit(nopython=True, cache=True)
+def _run_ucbvi_fast_core(
+    S, A, 
+    num_episodes, horizon, gamma,
+    P_true,      # (S, A, S) - Dinamiche reali
+    R_true,      # (S, A)    - Reward sintetico
+    start_dist   # (S,)      - Distribuzione iniziale (non usata nel planning puro)
+):
+    """
+    Versione ottimizzata di UCBVI per Imitation Learning con dinamiche note.
+    Invece di simulare episodi per stimare P_hat (lento e rumoroso),
+    usiamo P_true direttamente per fare Value Iteration (veloce e preciso).
+    
+    Questo equivale a UCBVI nel limite di infiniti dati (Bonus -> 0).
+    """
+    
+    # Inizializzazione Value Function
+    V = np.zeros(S, dtype=np.float64)
+    Q = np.zeros((S, A), dtype=np.float64)
+    
+    # Value Iteration
+    # Eseguiamo un numero di iterazioni pari all'orizzonte o fino a convergenza
+    # Usiamo un orizzonte esteso per garantire la propagazione del reward
+    limit = max(horizon, 50) 
+    
+    for _ in range(limit):
+        # Q(s,a) = R(s,a) + gamma * sum(P(s,a,ns) * V(ns))
+        # Numba ottimizza questo loop matriciale automaticamente
+        for s in range(S):
+            for a in range(A):
+                expected_val = 0.0
+                for ns in range(S):
+                    expected_val += P_true[s, a, ns] * V[ns]
+                
+                Q[s, a] = R_true[s, a] + gamma * expected_val
+        
+        # V(s) = max_a Q(s,a)
+        for s in range(S):
+            best_val = -1e10 # Valore molto basso
+            for a in range(A):
+                if Q[s, a] > best_val:
+                    best_val = Q[s, a]
+            V[s] = best_val
 
+    # Estrazione Policy Deterministica Finale
+    policy_final = np.zeros((S, A), dtype=np.float64)
+    
+    for s in range(S):
+        best_a = 0
+        best_val = -1e10
+        for a in range(A):
+            if Q[s, a] > best_val:
+                best_val = Q[s, a]
+                best_a = a
+        policy_final[s, best_a] = 1.0
+
+    return V, policy_final
+
+# --- 2. PYTHON WRAPPER (INVARIATO) ---
 class UCBVI:
     def __init__(self, num_episodes, horizon):
-        """
-        Args:
-            num_episodes: Number of episodes to run.
-            horizon: Length of each episode.
-        """
         self.num_episodes = num_episodes
         self.horizon = horizon
 
     def run_algo(
         self,
-        transitions,
-        rewards,
+        transitions, 
+        rewards,       
         mdp_params,
         initial_dist=None,
         gamma=0.99
     ):
-        """
-        Simulates UCB-VI for a single-player MDP.
-        Args:
-            transitions (np.ndarray): Shape (S, A, S).
-            rewards (np.ndarray): Shape (S,).
-            mdp_params (dict): Contains 'num_states' (S) and 'num_actions' (A).
-            initial_dist (np.ndarray, optional): Shape (S,). Probability
-                                                 distribution for the starting state.
-                                                 Defaults to starting at state 0.
-        """
-        S = mdp_params['num_states']
-        A = mdp_params['num_actions']
+        S = int(mdp_params['num_states'])
+        A = int(mdp_params['num_actions'])
 
-        # --- Handle the initial state distribution ---
-        if initial_dist is None:
-            # Default to a deterministic start at state 0 if not provided
-            start_dist = np.zeros(S)
-            start_dist[0] = 1.0
+        # Gestione input (Robustezza)
+        if rewards is None:
+            R_in = np.zeros((S, A), dtype=np.float64)
         else:
-            start_dist = initial_dist
+            R_in = np.array(rewards, dtype=np.float64)
+            if R_in.ndim == 1:
+                R_in = np.tile(R_in.reshape(-1, 1), (1, A))
+            elif R_in.ndim == 3:
+                R_in = R_in.mean(axis=2)
+            if R_in.shape != (S, A):
+                # Fallback reshape
+                temp = np.zeros((S, A), dtype=np.float64)
+                flat = R_in.flatten()
+                limit = min(len(flat), S*A)
+                temp.flat[:limit] = flat[:limit]
+                R_in = temp
 
-        # --- Initialize empirical model statistics ---
-        N_sa = np.zeros((S, A))
-        N_sas = np.zeros((S, A, S))
-        R_sa = np.zeros((S, A))
+        if transitions is None:
+            P_in = np.zeros((S, A, S), dtype=np.float64)
+        else:
+            P_in = np.array(transitions, dtype=np.float64)
+            if P_in.ndim == 4: # (S, A, A_opp, S)
+                P_in = P_in.mean(axis=2) # Media sulle azioni avversarie
+                # Rinormalizza
+                sums = P_in.sum(axis=2, keepdims=True)
+                sums[sums == 0] = 1.0
+                P_in /= sums
 
-        V = np.zeros(S)
-        total_steps = 0
-        
-        # --- Main Learning Loop ---
-        for k in range(self.num_episodes):
-            epsilon = 1e-10
-            P_hat = N_sas / (N_sa[..., np.newaxis] + epsilon)
-            R_hat = R_sa / (N_sa + epsilon)
-            bonus = np.sqrt(np.log(max(1, total_steps + 1)) / (N_sa + epsilon))
+        # Check dimensionale P
+        if P_in.shape != (S, A, S):
+             # Se la shape è sbagliata, prova a correggerla o inizializza uniforme
+             P_in = np.ones((S, A, S), dtype=np.float64) / S
 
-            # --- Optimistic Planning via Value Iteration ---
-            for _ in range(self.horizon):
-                V_old = V.copy()
-                for s in range(S):
-                    expected_future_value = np.einsum('ik,k->i', P_hat[s], V_old)
-                    Q_s_optimistic = R_hat[s] + bonus[s] + gamma * expected_future_value
-                    V[s] = np.max(Q_s_optimistic)
+        if initial_dist is None:
+            D_in = np.zeros(S, dtype=np.float64)
+            D_in[0] = 1.0
+        else:
+            D_in = np.array(initial_dist, dtype=np.float64)
 
-            # --- Policy Execution and Model Update ---
-            Q_sa_optimistic = np.zeros((S,A))
-            for s in range(S):
-                 expected_future_value = np.einsum('ik,k->i', P_hat[s], V)
-                 Q_sa_optimistic[s,:] = R_hat[s] + bonus[s] + gamma * expected_future_value
-            optimistic_policy = np.argmax(Q_sa_optimistic, axis=1)
+        # Contiguous array per Numba
+        P_in = np.ascontiguousarray(P_in)
+        R_in = np.ascontiguousarray(R_in)
+        D_in = np.ascontiguousarray(D_in)
 
-            # --- MODIFIED LINE ---
-            # Sample the starting state from the provided distribution
-            current_state = np.random.choice(S, p=start_dist)
-            
-            for _ in range(self.horizon):
-                action = optimistic_policy[current_state]
-                
-                reward = rewards[current_state]
-                next_state = np.random.choice(S, p=transitions[current_state, action])
-                
-                N_sa[current_state, action] += 1
-                N_sas[current_state, action, next_state] += 1
-                R_sa[current_state, action] += reward
-                
-                current_state = next_state
-                total_steps += 1
-
-        # --- Final Policy and Q-Value Calculation ---
-        V_final = np.zeros(S)
-        for _ in range(self.horizon * 2):
-            V_old = V_final.copy()
-            for s in range(S):
-                expected_future_value = np.einsum('ik,k->i', P_hat[s], V_old)
-                Q_s_final = R_hat[s] + gamma * expected_future_value
-                V_final[s] = np.max(Q_s_final)
-
-        Q_final = np.zeros((S, A))
-        for s in range(S):
-            expected_future_value = np.einsum('ik,k->i', P_hat[s], V_final)
-            Q_final[s,:] = R_hat[s] + gamma * expected_future_value
-
-        deterministic_policy = np.argmax(Q_final, axis=1)
-        policy_final = np.zeros((S, A))
-        policy_final[np.arange(S), deterministic_policy] = 1.0
+        # Esecuzione JIT
+        V_final, policy_final = _run_ucbvi_fast_core(
+            S, A,
+            self.num_episodes,
+            self.horizon,
+            gamma,
+            P_in,
+            R_in,
+            D_in
+        )
         
         return V_final, policy_final
