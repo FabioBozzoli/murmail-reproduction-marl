@@ -186,7 +186,7 @@ gap(π) = max_π'₁ V^{π'₁,π₂}(d₀) + max_π'₂ V^{π₁,π'₂}(d₀) 
 ## 📚 References
 
 - **MURMAIL Paper:** [Maximum Uncertainty Response Multi-Agent Imitation Learning](https://arxiv.org/abs/...)
-- **Environment:** PettingZoo MPE Simple Speaker-Listener
+- **Environment:** PettingZoo MPE Simple Speaker-Listener discretized
 - **Fictitious Play:** Brown (1951), Robinson (1951)
 - **Nash Equilibrium:** Nash (1950)
 
