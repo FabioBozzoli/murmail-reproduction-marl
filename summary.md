@@ -235,75 +235,118 @@ Nash equilibrium $⟺ ε = 0$
 
 ## **2.3 Fictitious Play: Algoritmo per Nash**
 
-### **Nota sulla convergenza:**
+Per generare la policy esperta nel progetto, è stata utilizzata una variante del **Fictitious Play Classico (Simultaneo)** adattata per Giochi Markoviani (Stochastic Games).
 
-Fictitious Play (FP) **non garantisce convergenza in general-sum stochastic games**. Tuttavia, empiricamente converge nel nostro setting grazie a:
-- Struttura cooperativa (reward condiviso)
-- Dinamiche approssimativamente deterministiche
-- Spazio stati finito dopo discretizzazione
+A differenza di approcci avidi come la *Iterated Best Response* (che possono portare a cicli infiniti), il Fictitious Play garantisce una maggiore stabilità e la convergenza all'Equilibrio di Nash in giochi cooperativi, poiché ogni agente ottimizza la propria strategia contro la **media storica** del comportamento dell'avversario.
 
-### **Algoritmo:**
+## Caratteristiche Chiave
 
-```python
-# Inizializza policy uniformi
-π_speaker = uniform(3) per ogni stato
-π_listener = uniform(5) per ogni stato
+1.  **Memoria Storica (Average Strategy):** Gli agenti non reagiscono all'ultima mossa dell'avversario, ma alla distribuzione di probabilità media accumulata dall'inizio del training. Questo processo di "smoothing" smorza le oscillazioni.
+2.  **Best Response "Profonda" (Model-Based):** Essendo l'ambiente sequenziale (Markoviano), il calcolo della "Miglior Risposta" non è istantaneo. L'agente costruisce un *MDP indotto* fissando la policy media dell'avversario e lo risolve completamente tramite **Value Iteration**.
+3.  **Aggiornamento Simultaneo:** Entrambi gli agenti (Speaker e Listener) calcolano le nuove Best Response contemporaneamente basandosi sulle medie al tempo $t$, e successivamente aggiornano le proprie medie per il tempo $t+1$.
 
-for iteration in range(2000):
-    # Speaker best response
-    for s in states:
-        Q_speaker[s, a_s] = Σ_{a_l} π_listener[s, a_l] × 
-                            [R(s, a_s, a_l) + γ Σ_{s'} P(s'|s,a_s,a_l) V(s')]
-        
-        π_speaker[s] = argmax_{a_s} Q_speaker[s, a_s]
-    
-    # Listener best response
-    for s in states:
-        Q_listener[s, a_l] = Σ_{a_s} π_speaker[s, a_s] × 
-                             [R(s, a_s, a_l) + γ Σ_{s'} P(s'|s,a_s,a_l) V(s')]
-        
-        π_listener[s] = argmax_{a_l} Q_listener[s, a_l]
-    
-    # Monitor convergence
-    gap = calc_exploitability(π_speaker, π_listener)
-    if gap < threshold:
-        break
-```
+## Pseudocodice dell'Algoritmo
+
+**Input:**
+* Modello dell'ambiente: Matrice di Transizione $P(s'|s, a_{spk}, a_{lst})$ e Ricompensa $R(s, a_{spk}, a_{lst})$
+* Fattore di sconto $\gamma$
+* Iterazioni totali $N$
+* Iterazioni per Value Iteration $K$
+
+**Inizializzazione:**
+* $\bar{\pi}_{spk} \leftarrow$ Uniforme
+* $\bar{\pi}_{lst} \leftarrow$ Uniforme
+* $t \leftarrow 1$
+
+**Loop Principale (fino a $N$):**
+
+1.  **Calcolo Best Response Speaker ($\pi^*_{spk}$)**
+    * L'agente Speaker marginalizza il modello rispetto alla policy media del Listener:
+        $$P_{spk}(s'|s, a_{spk}) = \sum_{a_{lst}} P(s'|s, a_{spk}, a_{lst}) \cdot \bar{\pi}_{lst}(a_{lst}|s) \newline R_{spk}(s, a_{spk}) = \sum_{a_{lst}} R(s, a_{spk}, a_{lst}) \cdot \bar{\pi}_{lst}(a_{lst}|s)$$
+    * Risolve l'MDP indotto $(P_{spk}, R_{spk})$ tramite **Value Iteration** (per $K$ passi) trovando la policy ottima deterministica $\pi^*_{spk}$.
+
+2.  **Calcolo Best Response Listener ($\pi^*_{lst}$)**
+    * Simultaneamente, il Listener marginalizza il modello rispetto alla policy media dello Speaker:
+        $$P_{lst}(s'|s, a_{lst}) = \sum_{a_{spk}} P(s'|s, a_{spk}, a_{lst}) \cdot \bar{\pi}_{spk}(a_{spk}|s)$$
+    * Risolve l'MDP indotto tramite **Value Iteration** trovando la policy ottima deterministica $\pi^*_{lst}$.
+
+3.  **Aggiornamento Strategie Medie (Fictitious Play Update)**
+    * Si calcola il tasso di apprendimento: $\alpha_t = \frac{1}{t}$
+    * Si aggiornano le policy medie integrando la nuova Best Response:
+        $$\bar{\pi}_{spk}^{(t+1)} = (1 - \alpha_t) \cdot \bar{\pi}_{spk}^{(t)} + \alpha_t \cdot \pi^*_{spk} \newline \bar{\pi}_{lst}^{(t+1)} = (1 - \alpha_t) \cdot \bar{\pi}_{lst}^{(t)} + \alpha_t \cdot \pi^*_{lst}$$
+    * $t \leftarrow t + 1$
+
+**Output:**
+* Le policy finali restituite sono le medie storiche $\bar{\pi}_{spk}$ e $\bar{\pi}_{lst}$.
+
+---
+
+### Nota sulla Convergenza
+L'uso del fattore di aggiornamento $\alpha_t = 1/t$ implica che, matematicamente, la policy al tempo $T$ è la media aritmetica esatta di tutte le Best Response passate:
+$$\bar{\pi}_T = \frac{1}{T} \sum_{i=1}^{T} \pi^*_{BR, i}$$
+Questo meccanismo costringe l'agente a performare bene contro l'intero spettro di comportamenti mostrati dall'avversario nel tempo, garantendo la robustezza necessaria per risolvere il gioco cooperativo.
 
 ### **Value Iteration per Best Response:**
 
-```python
-def value_iteration(π_opponent, R, P, γ, max_iter=1000, tol=1e-6):
-    V = zeros(num_states)
-    
-    for iteration in range(max_iter):
-        V_new = zeros(num_states)
-        
-        for s in states:
-            Q = zeros(num_my_actions)
-            
-            for a in my_actions:
-                q_value = 0
-                for a_opp in opponent_actions:
-                    prob = π_opponent[s, a_opp]
-                    
-                    r = R[s, a, a_opp]
-                    future = Σ_{s'} P[s, a, a_opp, s'] × V[s']
-                    
-                    q_value += prob × (r + γ × future)
-            
-                Q[a] = q_value
-            
-            V_new[s] = max(Q)
-        
-        if max(|V_new - V|) < tol:
-            break
-        
-        V = V_new
-    
-    return V
-```
+All'interno dell'algoritmo di Fictitious Play, la **Value Iteration (VI)** viene utilizzata come subroutine fondamentale per calcolare la "Best Response" (Miglior Risposta).
 
+Quando un agente (es. Speaker) fissa la strategia dell'altro agente (es. Listener) alla sua media storica, il gioco multi-agente si riduce temporaneamente a un **Markov Decision Process (MDP) a singolo agente**. Questo MDP "indotto" viene risolto tramite Value Iteration per trovare la policy ottima deterministica contro quella specifica strategia avversaria.
+
+Caratteristiche dell'Implementazione
+
+1.  **Vettorizzazione (Numpy):** L'algoritmo non itera sui singoli stati tramite loop nidificati (che sarebbero computazionalmente lenti), ma sfrutta operazioni matriciali ottimizzate (`np.dot` e broadcasting) per aggiornare i valori di tutti gli stati simultaneamente.
+2.  **Criterio di Arresto Doppio:** L'algoritmo termina quando si verifica una delle due condizioni:
+    * La differenza massima tra i valori di due iterazioni consecutive (norma infinito $||V_{new} - V_{old}||_\infty$) scende sotto una soglia di tolleranza ($\epsilon = 10^{-6}$).
+    * Viene raggiunto il numero massimo di iterazioni preimpostato ($K$).
+3.  **Calcolo Q-Value:** Oltre alla Value Function $V(s)$, l'algoritmo calcola esplicitamente la matrice $Q(s, a)$, necessaria al termine del processo per estrarre la policy deterministica ($\arg\max$).
+
+## Pseudocodice dell'Algoritmo
+
+**Input:**
+* Matrice di Transizione Indotta: $P_{ind} \in \mathbb{R}^{|A| \times |S| \times |S|}$
+* Matrice di Ricompensa Indotta: $R_{ind} \in \mathbb{R}^{|S| \times |A|}$
+* Fattore di sconto: $\gamma$
+* Numero massimo iterazioni: $K$
+* Soglia di convergenza: $\epsilon = 10^{-6}$
+
+**Inizializzazione:**
+* $V(s) \leftarrow 0$ per ogni stato $s \in S$
+* $k \leftarrow 0$
+
+**Loop Principale:**
+Mentre $k < K$:
+
+1.  **Salvataggio Stato Precedente:**
+    $V_{old} \leftarrow V$
+
+2.  **Bellman Update (Calcolo Q-Values):**
+    Per ogni azione $a$ possibile, si calcola il valore $Q$ vettorizzato per tutti gli stati:
+    $$Q(s, a) = R_{ind}(s, a) + \gamma \sum_{s' \in S} P_{ind}(s' | s, a) \cdot V_{old}(s')$$
+    *(Nota: Nel codice, questo corrisponde all'operazione `R[:, a] + gamma * dot(P[a], V_old)`)*
+
+3.  **Policy Improvement (Aggiornamento V):**
+    Si aggiorna la funzione valore scegliendo l'azione che massimizza il ritorno atteso per ogni stato (comportamento Greedy):
+    $$V(s) = \max_{a} Q(s, a)$$
+
+4.  **Controllo Convergenza:**
+    Si calcola la variazione massima (Delta):
+    $$\Delta = \max_{s} |V(s) - V_{old}(s)|$$
+    Se $\Delta < \epsilon$, interrompi il ciclo.
+
+5.  $k \leftarrow k + 1$
+
+**Output:**
+* Funzione Valore $V(s)$
+* Funzione Azione-Valore $Q(s, a)$ (utilizzata per determinare la Best Response finale: $\pi^*(s) = \arg\max_{a} Q(s, a)$)
+
+---
+
+### Nota sul contesto "Indotto"
+È fondamentale notare che le matrici $P_{ind}$ e $R_{ind}$ passate a questo algoritmo non sono le matrici grezze dell'ambiente multi-agente, ma sono state **marginalizzate** rispetto alla policy media dell'avversario ($\bar{\pi}_{opp}$) prima della chiamata:
+
+$$P_{ind}(s'|s, a) = \sum_{a_{opp}} P_{env}(s'|s, a, a_{opp}) \cdot \bar{\pi}_{opp}(a_{opp}|s)$$
+
+Questo passaggio trasforma l'incertezza strategica (cosa farà l'avversario?) in incertezza ambientale stocastica, permettendo alla Value Iteration standard di risolvere il problema in modo ottimale.
 ### **Risultati:**
 
 ```
@@ -328,199 +371,319 @@ expert_policy_listener_bins6.npy: (972, 5) - π_listener(a|s)
 
 ## **2.4 Exploitability Calculation**
 
-### **calc_exploitability_true (per policy fattorizzate indipendenti):**
+La funzione `calc_exploitability_true` costituisce il **metodo di validazione matematica** del progetto. Utilizzando le matrici reali dell'ambiente ( e , considerate "Ground Truth"), questa funzione misura oggettivamente la distanza delle policy apprese dall'Equilibrio di Nash.
 
-```python
-def calc_exploitability_true(π_speaker, π_listener, R, P, init_dist, γ):
-    """
-    Per policy INDIPENDENTI: π(a_s,a_l|s) = π_speaker(a_s|s) × π_listener(a_l|s)
-    """
-    
-    # 1. Value della policy corrente
-    V_current = compute_value(π_speaker, π_listener, R, P, init_dist, γ)
-    
-    # 2. Best response speaker (fissa π_listener)
-    V_br_speaker = best_response_speaker(π_listener, R, P, init_dist, γ)
-    ε_speaker = V_br_speaker - V_current
-    
-    # 3. Best response listener (fissa π_speaker)
-    V_br_listener = best_response_listener(π_speaker, R, P, init_dist, γ)
-    ε_listener = V_br_listener - V_current
-    
-    # 4. Total exploitability
-    return ε_speaker + ε_listener
-```
+### Il Concetto Teorico
+
+In Teoria dei Giochi, una coppia di strategie  costituisce un **Equilibrio di Nash** se nessun agente ha un incentivo a deviare unilateralmente dalla propria strategia.
+
+L'**Exploitability** (o *Nash Gap*) quantifica il "rimpianto" (*regret*) massimo dei giocatori, ovvero quanto guadagno addizionale potrebbero ottenere se passassero a una strategia perfetta (Best Response) mantenendo fissa quella dell'avversario.
+
+* **Gap $\sim 0$:** La policy è ottima (Equilibrio di Nash). Nessuno può migliorare il proprio risultato deviando.
+* **Gap $ > 0$:** La policy è sub-ottimale. Il valore indica quanto l'agente sta "lasciando sul tavolo" in termini di ricompensa attesa.
+
+### Funzionamento dell'Algoritmo
+
+La funzione esegue un confronto tra il rendimento attuale degli agenti e il rendimento teorico massimo calcolato tramite **Value Iteration**. Il codice implementa una logica per giochi a somma zero (o valutazione di robustezza *worst-case*), calcolando la Best Response sia del massimizzatore ($\mu$, Speaker) che del minimizzatore ($\nu$, Listener).
+
+### Pseudocodice e Logica
+
+**Input:**
+
+* Policy correnti: $\mu$ (Speaker), $\nu$ (Listener)
+* Modello "Ground Truth": Transizioni  e Reward 
+
+**Passo 1: Calcolo Valore Attuale ($V_{joint}$)**
+Si calcola il Valore Atteso generato dalle due policy correnti che giocano l'una contro l'altra. Questo è il punto di riferimento (Baseline).
+
+$$V_{joint} = \mathbb{E}_{\mu, \nu}[\sum_{t=0}^\infty \gamma^t R(s_t,a_t,b_t)]$$
+
+**Passo 2: Calcolo Best Response dello Speaker ($V_{br, \mu}^*$)**
+Si ipotizza che il Listener mantenga la sua strategia $\nu$ fissa. Lo Speaker cerca la deviazione ottima per massimizzare il proprio guadagno.
+
+1. **Marginalizzazione:** Si costruisce un MDP indotto per lo Speaker integrando la policy del Listener nelle dinamiche ambientali:
+
+$$P_\mu(s'|s,a) = \sum_b P(s'|s,a,b) \cdot \nu(b|s) \newline R_\mu(s,a) = \sum_b R(s,a,b) \cdot \nu(b|s)$$
+
+2. **Risoluzione (Value Iteration):** Si risolve l'MDP  per trovare il massimo valore teorico ottenibile:
+
+$$V_{br, \mu}^* = \max_{\pi'} V(\pi', \nu)$$
+
+**Passo 3: Calcolo Best Response del Listener ($V_{br, \nu}$)**
+Si ipotizza che lo Speaker mantenga la sua strategia $\mu$ fissa. Il Listener cerca la deviazione ottima. Nel contesto del codice, i reward vengono negati per trattare il problema come un gioco a somma zero (il Listener cerca di minimizzare il guadagno dello Speaker, o massimizzare la propria "vittoria" in un contesto competitivo).
+
+1. **Marginalizzazione (con Reward Negato):**
+
+$$P_\nu(s'|s,a) = \sum_b P(s'|s,a,b) \cdot \mu(b|s) \newline R_\nu(s,a) = - \sum_b R(s,a,b) \cdot \mu(b|s)$$
+
+2. **Risoluzione (Value Iteration):** Si risolve l'MDP :
+
+$$V_{br, \nu}^* = \max_{\pi'} V(\pi', \mu)$$
+
+**Passo 4: Calcolo del Gap**
+L'Exploitability è definita come il massimo guadagno possibile ottenibile deviando rispetto al valore attuale:
+
+$$\text{Gap} = \max ((V_{br, \mu}^* - V_{joint}) , (V_{br, \nu}^* - V_{joint}))$$
+
+*(Nota: Il codice include un clamp a 0.0 per gestire eventuali errori numerici di virgola mobile).*
+
+## Ruolo nel Progetto
+
+Questa funzione agisce come **Giudice Imparziale ("Ground Truth Metric")**:
+
+1. **Validazione dell'Esperto:** Durante la generazione dell'esperto (via Fictitious Play), questa funzione conferma se l'algoritmo ha convergiuto. Un valore basso (es. ) certifica matematicamente che l'esperto è valido.
+2. **Benchmark per Algoritmi RL:** Permette di confrontare algoritmi di apprendimento (come MURMAIL o MAPPO) rispetto all'ottimo teorico assoluto, fornendo una misura precisa della qualità della policy appresa che va oltre il semplice confronto dei reward medi campionati.
 
 ### **calc_true_exploitability (per policy joint correlate):**
 
-Per Joint-DQN, che impara π_joint(a_s, a_l | s), la formulazione standard non è appropriata. Sviluppata versione basata su Linear Programming:
+Quando si utilizzano algoritmi che apprendono policy congiunte correlate (come joint DQN come abbiamo usato), il calcolo dell'Exploitability standard via Value Iteration non è corretto, poiché la marginalizzazione distruggerebbe le informazioni di correlazione (es. segnali di coordinamento).
 
-```python
-def calc_true_exploitability(π_joint, R, P, init_dist, γ):
-    """
-    Per policy CORRELATE: π_joint(a_s, a_l | s)
-    
-    Usa Linear Programming per best response che correttamente
-    modella il condizionamento quando un agente devia.
-    
-    Nota: Questa è un'approssimazione conservativa; la vera
-    exploitability richiederebbe il calcolo di correlation breakage
-    completo.
-    """
-    
-    # 1. Compute occupancy measure
-    μ = compute_occupancy(π_joint, P, init_dist, γ)
-    
-    # 2. Speaker BR via LP con conditioning constraints
-    V_br_speaker = solve_LP_speaker(π_joint, R, P, μ, γ)
-    
-    # 3. Listener BR via LP con conditioning constraints
-    V_br_listener = solve_LP_listener(π_joint, R, P, μ, γ)
-    
-    # 4. Exploitability
-    V_current = expected_value(μ, R) / (1 - γ)
-    return (V_br_speaker - V_current) + (V_br_listener - V_current)
-```
+Infatti si consideri il seguente esempio:
+Immagina un Semaforo:
+- Se è Verde (50%), Speaker va e Listener si ferma.
 
-**Differenza chiave:**
-- **Factored:** Best response assume opponent gioca policy marginale indipendente
-- **Joint (LP):** Best response considera distribuzione condizionata indotta da π_joint
+- Se è Rosso (50%), Speaker si ferma e Listener va.
 
-**Nota metodologica:** L'implementazione LP enforces consistency con la distribuzione condizionale indotta da π_joint, fornendo una stima più accurata dell'exploitability per policy correlate rispetto alla semplice marginalizzazione.
+In questo caso, le azioni sono perfettamente coordinate.
+L'Errore della marginalizzazione: se provi a usare la Value Iteration su questo caso, devi prima separare le policy.
 
----
+- Speaker: "50% vado, 50% mi fermo" (sembra casuale!).
+
+- Listener: "50% mi fermo, 50% vado" (sembra casuale!).
+
+Risultato: La Value Iteration penserà che gli agenti siano stupidi e scoordinati, calcolando un valore sbagliato. Si perde l'informazione che "quando io vado, tu ti fermi SICURAMENTE".
+
+Per calcolare correttamente il Nash Gap in questo contesto, utilizziamo un approccio basato sulla **Programmazione Lineare (Linear Programming)** nello spazio delle misure di occupazione.
+
+## Formulazione Matematica
+
+L'obiettivo è trovare la deviazione unilaterale ottimale (Best Response) di un agente (es. Speaker), assumendo che l'altro agente (Listener) continui a rispondere secondo le probabilità condizionali dettate dalla policy congiunta $\pi_{joint}$.
+
+Definiamo la **Misura di Occupazione** $\mu(s, a_{spk}, a_{lst})$ come la distribuzione scontata delle visite alle coppie stato-azione. Essa risponde alla domanda: "considerando tutto il futuro (scontato con $\gamma$), quanto tempo passerò nello stato $s$ eseguendo l'azione $a$? 
+
+$$\mu(s, a_{spk}, a_{lst}) = (1 - \gamma) \sum_{t=0}^\infty \gamma^t P(s_t, \mathbf{a}_t = \mathbf{a} | \pi_{joint}), \text{ dove } \mathbf{a} = (a_{spk}, a_{lst})$$
+
+Il problema di Best Response per lo Speaker è formulato come segue:
+
+### Funzione Obiettivo
+Massimizzare il ritorno atteso:
+$$\max_{\mu} \sum_{s} \sum_{a_{spk}} \sum_{a_{lst}} \mu(s, a_{spk}, a_{lst}) \cdot R(s, a_{spk}, a_{lst})$$
+
+### Vincoli (Constraints)
+
+**1. Vincolo di Flusso (Bellman Flow Conservation):**
+Garantisce che la misura $\mu$ sia coerente con le dinamiche di transizione dell'ambiente $P$. Il flusso che esce da uno stato futuro $s'$deve essere uguale al flusso che entra in esso (dallo stato iniziale o da transizioni precedenti). Per ogni stato $s'$:
+
+$$\sum_{\mathbf{a}} \mu(s', \mathbf{a}) = (1-\gamma)\rho_0(s') + \gamma \sum_{s, \mathbf{a}} P(s' | s, \mathbf{a}) \mu(s, \mathbf{a})$$
+
+**2. Vincolo di Correlazione (Conditional Consistency):**
+Garantisce che, mentre lo Speaker è libero di ottimizzare la frequenza delle proprie azioni $a_{spk}$, il Listener mantenga la distribuzione condizionale originale $\pi(a_{lst} | s, a_{spk})$. Ossia:
+
+$$P(a_{lst} | s, a_{spk}) = \frac{\pi_{joint}(s, a_{spk}, a_{lst})}{\sum_{a} \pi_{joint}(s, a_{spk}, a)}$$
+
+Per ogni $s, a_{spk}$ e ogni coppia $a_{l1}, a_{l2}$:
+$$\mu(s, a_{spk}, a_{l1}) \cdot \pi_{joint}(s, a_{spk}, a_{l2}) = \mu(s, a_{spk}, a_{l2}) \cdot \pi_{joint}(s, a_{spk}, a_{l1})$$
+
+Infatti può essere riscritta anche come segue:
+$$\frac{\mu(s, a_{spk}, a_{l1})}{\mu(s, a_{spk}, a_{l2})} = \frac{\pi_{joint}(s, a_{spk}, a_{l1})}{\pi_{joint}(s, a_{spk}, a_{l2})}$$
+
+**3. Vincolo di Non-Negatività:**
+$$\mu(s, \mathbf{a}) \ge 0 \quad \forall s, \mathbf{a}$$
+
+## Calcolo del Gap
+
+L'Exploitability totale ($\mathcal{E}$) è la somma del guadagno addizionale che ciascun agente otterrebbe deviando ottimamente:
+
+1.  Si calcola il valore della policy corrente: $V_{joint}$.
+2.  Si risolve l'LP per lo Speaker ottenendo $$V_{BR, spk} = \frac{1}{1-\gamma} \max_{\mu} \sum_{s} \sum_{a_{spk}} \sum_{a_{lst}} \mu_{spk}(s, a_{spk}, a_{lst}) \cdot R(s, a_{spk}, a_{lst})$$
+3.  Si risolve l'LP simmetrico per il Listener ottenendo $$V_{BR, lst} = \frac{1}{1-\gamma} \max_{\mu} \sum_{s} \sum_{a_{spk}} \sum_{a_{lst}} \mu_{list}(s, a_{spk}, a_{lst}) \cdot R(s, a_{spk}, a_{lst})$$
+
+$$\mathcal{E} = (V_{BR, spk} - V_{joint}) + (V_{BR, lst} - V_{joint})$$
+
+Questo metodo è computazionalmente più oneroso della Value Iteration ma è l'unico modo matematicamente corretto per valutare equilibri correlati in giochi markoviani.
 
 # 🎓 **PARTE 3: MURMAIL IMPLEMENTATION**
 
 ## **3.1 Algoritmo MURMAIL**
 
-### **Paper: "Model-Free Multiagent Imitation Learning" (NeurIPS 2023)**
+### **Paper: "Model-Free Multiagent Imitation Learning" (NeurIPS 2025)**
 
-**Idea Core:**
+Nel tuo progetto, hai un Esperto (una coppia di policy Speaker-Listener calcolata con Fictitious Play) e vuoi addestrare un agente (o una coppia di agenti) a imitarlo.
+L'approccio classico è il **Behavioral Cloning (BC)**: "Fai esattamente quello che farebbe l'esperto nello stato attuale".
 
-```
-Invece di reinforcement learning from scratch con exploration:
-1. Query expert policy π* negli stati visitati durante training
-2. Esegui azioni suggerite dall'expert
-3. Aggiorna Q-function via Q-learning standard
-4. Policy appresa converge verso comportamento expert-like
-```
+Tuttavia, in un contesto Multi-Agente (o anche in MDP complessi), BC ha un difetto fatale evidenziato nel paper:
 
-### **Differenza da RL Standard:**
+* **Il problema della "Covariate Shift":** Se l'agente commette un piccolo errore e finisce in uno stato che l'esperto non visita mai (fuori dalla distribuzione dei dati di training), l'agente non sa cosa fare.
+* **Sfruttamento:** In un gioco a somma zero o competitivo, l'avversario può imparare a spingere l'agente proprio in quegli stati sconosciuti per sfruttarlo.
+* **Risultato:** Anche con un errore di imitazione basso sui dati di training, il **Nash Gap** (l'exploitability reale) può essere enorme.
 
-**RL Standard (ε-greedy exploration):**
-```python
-for episode in episodes:
-    s = env.reset()
-    while not done:
-        a = ε_greedy(Q[s])  # Esplora azioni con probability ε
-        s', r = env.step(a)
-        Q[s,a] += α(r + γ max_{a'} Q[s',a'] - Q[s,a])
+**MURMAIL** risolve questo problema non limitandosi a copiare l'esperto, ma **cercando attivamente** gli stati in cui l'imitazione è debole e chiedendo all'esperto come comportarsi *lì*.
 
-Limitazione: Exploration inefficiente in spazi ampi,
-credit assignment difficile in setting multi-agente
-```
+L'algoritmo funziona su due livelli:
 
-**MURMAIL:**
-```python
-for episode in episodes:
-    s = env.reset()
-    while not done:
-        a = sample_from_expert(π*(s))  # ← Query expert
-        s', r = env.step(a)
-        Q[s,a] += α(r + γ max_{a'} Q[s',a'] - Q[s,a])
+### **A. Inner Loop: Generazione dell'Avversario "Critico"**
 
-Vantaggio: Segue traiettorie informate dall'expert,
-sample efficiency migliorata
-```
+Invece di giocare contro un avversario che vuole vincere (come in Fictitious Play), qui ogni agente gioca contro un avversario "immaginario" che cerca di **massimizzare l'incertezza**.
+
+L'algoritmo costruisce un MDP indotto dove il **Reward** non è il punteggio del gioco, ma la **distanza dalla policy dell'esperto**:
+
+$$R(s) \sim ||\pi_{expert}(\cdot | s) - \pi_{learner}(\cdot|s)||^2$$
+
+L'obiettivo dell'Inner Loop è trovare una policy $\pi_{attack}$ che porti il sistema negli stati dove questo reward è alto (cioè dove l'agente sta sbagliando a imitare).
+
+### **B. Outer Loop: Correzione via Mirror Descent**
+
+Una volta trovati questi stati critici, l'algoritmo:
+
+1. Visita quegli stati usando la policy $\pi_{attack}$.
+2. Interroga l'esperto: "Cosa faresti in questo stato strano?".
+3. Aggiorna la policy dell'agente usando **Exponential Weights** (una forma di Mirror Descent) per avvicinarsi all'esperto anche in quelle zone.
+
+
 
 ---
 
-## **3.2 Implementazione MURMAIL**
+## **3. Implementazione nel Tuo Progetto**
 
-### **Setup:**
+Ecco come implementare MURMAIL integrandolo con il tuo codice esistente. Poiché tu hai accesso al modello del gioco (le matrici $P$ e $R$ che hai stimato o calcolato), puoi usare una versione **Model-Based** molto più efficiente di quella presentata nel paper (che usa UCBVI perché assume di non conoscere il modello).
 
-```python
-# Environment discreto
-S_speaker = 3
-S_listener = 972
-A_speaker = 3
-A_listener = 5
+### **Struttura del Codice**
 
-# Q-tables inizializzate
-Q_speaker = zeros((S_speaker, A_speaker))
-Q_listener = zeros((S_listener, A_listener))
+Crea un nuovo file o classe `MURMAIL_Solver`.
 
-# Expert policies (pre-calcolate via Fictitious Play)
-π_expert_speaker = load("expert_policy_speaker_bins6.npy")
-π_expert_listener = load("expert_policy_listener_bins6.npy")
-```
+#### **Passo 1: Inizializzazione**
 
-### **Training Loop:**
+Carica le matrici $P$ e $R$ le policy dell'esperto ($\mu_E, \nu_E$) che hai già generato. Inizializza le policy dell'agente ($\mu_k, \nu_k$) come uniformi.
 
 ```python
-gaps = []
-query_counts = []
-total_queries = 0
-α = 0.1  # Learning rate
-γ = 0.9  # Discount factor
+class MURMAIL_Solver:
+    def __init__(self, P, expert_mu, expert_nu, gamma=0.9, lr=1.0):
+        self.P = P  # Matrice transizioni (S, A_spk, A_lst, S)
+        self.muE = expert_mu  # Esperto Speaker
+        self.nuE = expert_nu  # Esperto Listener
+        self.gamma = gamma
+        self.eta = lr  # Learning rate
+        
+        # Policy iniziali uniformi
+        self.S, self.A_mu, self.A_nu, _ = P.shape
+        self.mu = np.ones((self.S, self.A_mu)) / self.A_mu
+        self.nu = np.ones((self.S, self.A_nu)) / self.A_nu
 
-for episode in range(num_episodes):
-    s_speaker, s_listener = env.reset()
-    done = False
-    
-    while not done:
-        # Query expert (sampling from stochastic policy)
-        a_speaker = sample(π_expert_speaker[s_speaker])
-        a_listener = sample(π_expert_listener[s_listener])
-        total_queries += 1
-        
-        # Execute actions
-        (s_speaker', s_listener'), reward, done = env.step(a_speaker, a_listener)
-        
-        # Q-learning update (speaker)
-        target_speaker = reward + γ × max(Q_speaker[s_speaker'])
-        Q_speaker[s_speaker, a_speaker] += α × (target_speaker - Q_speaker[s_speaker, a_speaker])
-        
-        # Q-learning update (listener)
-        target_listener = reward + γ × max(Q_listener[s_listener'])
-        Q_listener[s_listener, a_listener] += α × (target_listener - Q_listener[s_listener, a_listener])
-        
-        # Update state
-        s_speaker, s_listener = s_speaker', s_listener'
-    
-    # Periodic evaluation
-    if episode % eval_freq == 0:
-        gap = evaluate_gap(Q_speaker, Q_listener)
-        gaps.append(gap)
-        query_counts.append(total_queries)
 ```
 
-### **Evaluation:**
+#### **Passo 2: Calcolo del Reward di Incertezza (Lemma G.7)**
+
+Questa funzione calcola quanto la tua policy attuale è diversa da quella dell'esperto in ogni stato. È il "motore" che guida l'esplorazione.
 
 ```python
-def evaluate_gap(Q_speaker, Q_listener):
-    # Extract greedy deterministic policies from Q-tables
-    π_speaker = zeros((S_speaker, A_speaker))
-    π_listener = zeros((S_listener, A_listener))
-    
-    for s in range(S_speaker):
-        best_a = argmax(Q_speaker[s])
-        π_speaker[s, best_a] = 1.0
-    
-    for s in range(S_listener):
-        best_a = argmax(Q_listener[s])
-        π_listener[s, best_a] = 1.0
-    
-    # Calculate exploitability
-    gap = calc_exploitability_true(
-        π_speaker, π_listener,
-        R, P, init_dist, γ
-    )
-    
-    return gap
+    def _compute_uncertainty_reward(self, current_pi, expert_pi):
+        # R(s) = ||pi_expert(s) - pi_current(s)||^2
+        # Calcolo vettorizzato per efficienza
+        diff = expert_pi - current_pi
+        reward = np.sum(diff**2, axis=1)
+        return reward
+
 ```
 
+Nota: Nel paper usano uno stimatore stocastico unbiased, ma avendo accesso alle policy esatte, puoi calcolare la norma quadratica esatta direttamente.
+
+#### **Passo 3: Inner Loop (Planning)**
+
+Qui sostituiamo l'RL complesso (UCBVI) con una **Value Iteration** veloce, dato che conosciamo $P$.
+Dobbiamo trovare la policy avversaria che massimizza la visita agli stati incerti.
+
+```python
+    def _solve_max_uncertainty(self, fixed_policy, is_speaker_fixed):
+        # 1. Calcola MDP indotto fissando l'altro agente
+        if is_speaker_fixed:
+            # Se mu è fisso, l'avversario (nu) vede queste transizioni
+            P_induced = np.einsum('sabt,sa->sbt', self.P, fixed_policy)
+            R_uncertainty = self._compute_uncertainty_reward(self.nu, self.nuE)
+        else:
+            # Se nu è fisso, l'avversario (mu) vede queste
+            P_induced = np.einsum('sabt,sb->sat', self.P, fixed_policy)
+            R_uncertainty = self._compute_uncertainty_reward(self.mu, self.muE)
+
+        # 2. Risolvi questo MDP singolo agente (Value Iteration)
+        # L'obiettivo è MASSIMIZZARE il reward di incertezza cumulato
+        V = np.zeros(self.S)
+        for _ in range(100): # Bastano poche iterazioni
+            Q = R_uncertainty[:, None] + self.gamma * P_induced @ V
+            V = np.max(Q, axis=1)
+        
+        # Estrai la policy "d'attacco" (Greedy)
+        Q_final = R_uncertainty[:, None] + self.gamma * P_induced @ V
+        attack_policy = np.zeros_like(Q_final)
+        best_actions = np.argmax(Q_final, axis=1)
+        attack_policy[np.arange(self.S), best_actions] = 1.0
+        
+        return attack_policy
+
+```
+
+#### **Passo 4: Outer Loop (Aggiornamento)**
+
+Eseguiamo il ciclo principale che aggiorna le policy.
+
+```python
+    def train(self, iterations=1000):
+        avg_mu = np.copy(self.mu)
+        avg_nu = np.copy(self.nu)
+
+        for k in range(1, iterations + 1):
+            # --- FASE 1: Trova i punti deboli (Attack Policies) ---
+            # Trova la policy del Listener che mette in crisi lo Speaker
+            nu_attack = self._solve_max_uncertainty(self.mu, is_speaker_fixed=True)
+            # Trova la policy dello Speaker che mette in crisi il Listener
+            mu_attack = self._solve_max_uncertainty(self.nu, is_speaker_fixed=False)
+
+            # --- FASE 2: Calcola Gradienti (dove l'esperto è diverso da noi) ---
+            # Campioniamo stati visitati dalle policy d'attacco
+            d_mu = self._get_occupancy(self.mu, nu_attack)
+            d_nu = self._get_occupancy(mu_attack, self.nu)
+            
+            # Il gradiente spinge verso la policy dell'esperto pesata dalla visita
+            # G(s, a) = d(s) * (pi(a|s) - expert(a|s))
+            # In pratica, usiamo Mirror Descent / Exp Weights:
+            # pi_new(a|s) proptional to pi_old(a|s) * exp(-eta * grad)
+            
+            # Semplificazione implementativa (Exponential Weights):
+            # Aumentiamo la probabilità delle azioni dell'esperto negli stati visitati
+            # Gradiente approssimato: - (Expert - Current)
+            
+            grad_mu = - (self.muE - self.mu) * d_mu[:, None]
+            grad_nu = - (self.nuE - self.nu) * d_nu[:, None]
+
+            # --- FASE 3: Aggiornamento ---
+            self.mu = self.mu * np.exp(-self.eta * grad_mu)
+            self.nu = self.nu * np.exp(-self.eta * grad_nu)
+            
+            # Normalizzazione
+            self.mu /= np.sum(self.mu, axis=1, keepdims=True)
+            self.nu /= np.sum(self.nu, axis=1, keepdims=True)
+
+            # Aggiornamento della media (Polyak Averaging)
+            alpha = 1 / (k + 1)
+            avg_mu = (1 - alpha) * avg_mu + alpha * self.mu
+            avg_nu = (1 - alpha) * avg_nu + alpha * self.nu
+            
+        return avg_mu, avg_nu
+
+```
+
+*Nota: La funzione `_get_occupancy` calcola la distribuzione stazionaria degli stati data la coppia di policy, risolvendo il sistema lineare .*
+
+---
+
+## **4. Riassunto per le Note Tecniche**
+
+Da inserire nella tua documentazione:
+
+* **Cos'è MURMAIL:** Un algoritmo di Imitation Learning attivo che, invece di copiare passivamente l'esperto, cerca di "rompere" la propria policy attuale trovando stati in cui essa differisce dall'esperto, e poi corregge quegli errori specifici.
+* **Perché lo usiamo:** Perché il Behavioral Cloning standard non garantisce robustezza (basso Nash Gap) in giochi dove l'esperto non copre tutto lo spazio degli stati. MURMAIL offre garanzie teoriche di convergenza a un -Nash Equilibrium.
+
+
+* **Innovazione nel Progetto:** Abbiamo adattato l'algoritmo originale (Model-Free, basato su campionamento) in una versione **Model-Based** (basata su Value Iteration), sfruttando la conoscenza esplicita delle dinamiche del gioco ($P$ e $R$) ottenuta nella fase precedente. Questo rende l'addestramento ordini di grandezza più veloce e stabile.
 ### **Risultati:**
 
 ```
@@ -610,72 +773,70 @@ Testare state-of-the-art deep RL senza accesso all'expert
 
 ---
 
-## **4.2 Baseline 1: DQN con Curriculum Learning**
+## 4.2 Baseline: Independent DQN (IDQN) con Curriculum Learning
 
-### **Approccio:**
+### 4.2.1 Motivazione Teorica e Problema della Non-Stazionarietà
 
-```
-Curriculum in 3 fasi per facilitare apprendimento:
+L'addestramento simultaneo di agenti indipendenti in un ambiente cooperativo soffre intrinsecamente del problema della **Non-Stazionarietà Ambientale**.
+Formalmente, per un agente $i$, la dinamica di transizione e la funzione di reward dipendono dalla policy congiunta di tutti gli altri agenti $\pi_{-i}$.
 
-Fase 1: Speaker training con expert listener fixed
-→ Speaker impara a generare comunicazioni
+In un approccio *naive* (apprendimento simultaneo da zero), l'obiettivo di ottimizzazione per l'agente $i$ al tempo $t$ è:
+$$\max_{\theta_i} J(\theta_i) = \mathbb{E}_{s \sim \rho, a_i \sim \pi_i, a_{-i} \sim \pi_{-i}^{(t)}} \left[ \sum_{k=0}^{\infty} \gamma^k r_{t+k} \right]$$
 
-Fase 2: Listener training con trained speaker fixed
-→ Listener impara a interpretare comunicazioni
+Poiché $\pi_{-i}^{(t)}$ cambia continuamente mentre gli altri agenti apprendono, la distribuzione dei dati di input per l'agente $i$ non è stazionaria (covariate shift). Questo porta a gradienti rumorosi e spesso impedisce la convergenza, specialmente in compiti di coordinazione stretta come *Speaker-Listener*, dove il reward è sparso:
+$$R(s, a_{spk}, a_{lst}) \gg 0 \iff \text{Communication}(a_{spk}) \text{ is correct } \land \text{Navigation}(a_{lst}) \text{ is correct}$$
 
-Fase 3: Joint refinement
-→ Entrambi gli agenti si adattano reciprocamente
-```
-
-### **Implementazione:**
-
-```python
-# Fase 1: Train speaker (5000 episodes)
-for episode in range(5000):
-    s = env.reset()
-    while not done:
-        # Speaker explores
-        a_speaker = ε_greedy(Q_speaker[s_speaker])
-        
-        # Listener uses expert (fixed)
-        a_listener = expert_listener_policy(s_listener)
-        
-        # Update solo speaker Q-function
-        update_Q(Q_speaker, s_speaker, a_speaker, reward, s_speaker')
-
-# Fase 2: Train listener (5000 episodes)
-for episode in range(5000):
-    # Speaker fixed (trained), listener learns
-    ...
-
-# Fase 3: Joint training (10000 episodes)
-for episode in range(10000):
-    # Entrambi esplorano e aggiornano
-    ...
-```
-
-### **Risultati:**
-
-```
-Fase    Episodes    Gap     Note
------   ---------   -----   ----
-1       5000        0.50    Speaker training
-2       10000       0.51    Listener training
-3       20000       0.50    Joint refinement
-
-Risultato finale: Gap 0.50 (nessun apprendimento significativo)
-```
-
-**Analisi:**
-```
-Problema fondamentale: Independent learning
-- Speaker impara comunicazione locale ma non coordinata globalmente
-- Listener impara movimento locale ma non allineato con speaker
-- Fase 3 non riesce a sincronizzare i due agenti
-→ Coordination problem non risolto
-```
+Per mitigare questo problema, adottiamo un approccio di **Curriculum Learning in 3 Fasi**, che decompone il problema Multi-Agente in una sequenza di problemi Single-Agent stazionari.
 
 ---
+
+### 4.2.2 Architettura e Fasi del Curriculum
+
+Utilizziamo due approssimatori di funzione separati (Reti Neurali) parameterizzati da $\theta_S$ (Speaker) e $\theta_L$ (Listener), ottimizzati tramite la loss classica DQN:
+$$\mathcal{L}(\theta) = \mathbb{E}_{(s,a,r,s') \sim \mathcal{D}} \left[ \left( r + \gamma \max_{a'} Q(s', a'; \theta^-) - Q(s, a; \theta) \right)^2 \right]$$
+
+### **Fase 1: Speaker Grounding (Teacher Forcing)**
+
+In questa fase, addestriamo solo lo Speaker ($\theta_S$) mantenendo il Listener fissato su una policy esperta ottimale $\pi_L^*$.
+
+* **Obiettivo:** Ancoraggio semantico (*Language Grounding*).
+* **Formalismo:** L'ambiente percepito dallo Speaker diventa un MDP stazionario indotto da $\pi_L^*$.
+    $$P_{induced}(s'|s, a_S) = \sum_{a_L} P(s'|s, a_S, a_L) \pi_L^*(a_L | s, a_S)$$
+* **Giustificazione:** L'uso dell'esperto $\pi_L^*$ agisce come un oracolo. Se lo Speaker emette il messaggio corretto $m^*$, l'esperto garantisce l'azione corretta $a_L^*$, generando un reward positivo $r > 0$. Senza l'esperto, un Listener casuale produrrebbe $r \approx 0$ indipendentemente dall'azione dello Speaker, annullando il gradiente ($\nabla_{\theta_S} J \approx 0$).
+
+### **Fase 2: Listener Adaptation (Stationary Environment)**
+
+Congeliamo i pesi dello Speaker ($\theta_S$) ottenuto nella Fase 1 e addestriamo il Listener ($\theta_L$).
+
+* **Obiettivo:** Interpretazione del protocollo.
+* **Formalismo:** Il Listener deve apprendere la funzione inversa della policy dello Speaker $\pi_S(m|s)$. Dato un messaggio $m$, deve dedurre lo stato $s$ e agire di conseguenza.
+* **Giustificazione:** Fissando $\theta_S$, eliminiamo la non-stazionarietà. Il Listener affronta un problema di Supervised Learning implicito (RL standard), dove l'input è il messaggio generato da una distribuzione fissa. Manteniamo un $\epsilon > 0$ nello Speaker per garantire che il Listener sia robusto a un leggero rumore nel canale comunicativo.
+
+### **Fase 3: Joint Refinement (Co-Adaptation)**
+
+Riabilitiamo l'aggiornamento dei gradienti per entrambi gli agenti ($\theta_S$ e $\theta_L$) simultaneamente.
+
+* **Obiettivo:** Convergenza all'Equilibrio di Nash locale.
+* **Formalismo:**
+    $$\theta_S \leftarrow \theta_S - \alpha \nabla_{\theta_S} \mathcal{L}_S, \quad \theta_L \leftarrow \theta_L - \alpha \nabla_{\theta_L} \mathcal{L}_L$$
+* **Giustificazione:** La Fase 2 potrebbe aver portato il Listener a fare *overfitting* sulla policy deterministica dello Speaker. Questa fase permette un *fine-tuning* reciproco ("Co-adaptation"), correggendo eventuali disallineamenti residui e permettendo agli agenti di negoziare variazioni minime al protocollo per massimizzare il ritorno congiunto.
+
+---
+
+### 4.2.3 Dettagli Implementativi Critici
+
+1.  **Independent Learning (Decentralized):**
+    A differenza di Joint-DQN, qui non esiste una $Q_{tot}$.
+    * $Q_S: \mathcal{S}_{spk} \times \mathcal{A}_{msg} \to \mathbb{R}$
+    * $Q_L: \mathcal{S}_{lst} \times \mathcal{A}_{msg} \times \mathcal{A}_{nav} \to \mathbb{R}$
+    Questa scelta serve a valutare la difficoltà del coordinamento in assenza di comunicazione esplicita dei gradienti (scenario realistico distribuito).
+
+2.  **Reward Normalization:**
+    I reward grezzi $r \in \mathbb{R}$ vengono mappati in $\hat{r} \in [0, 1]$ tramite clipping.
+    * **Motivo:** Stabilizzare la varianza dell'errore TD (*Temporal Difference*). In contesti con reward sparsi e di magnitudine elevata, l'errore quadratico medio (MSE) può esplodere, destabilizzando l'apprendimento della rete neurale.
+
+3.  **Policy Esperta $\pi_L^*$:**
+    Derivata tramite *Fictitious Play* nella fase precedente del progetto. Viene utilizzata esclusivamente nella Fase 1 come meccanismo di "bootstrapping" per rompere la simmetria iniziale e avviare il gradiente.
 
 ## **4.3 Baseline 2: MAPPO (Multi-Agent PPO)**
 

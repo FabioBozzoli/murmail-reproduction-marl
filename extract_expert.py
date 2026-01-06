@@ -1,11 +1,12 @@
 """
-generate_expert_FINAL.py - VERSIONE CORRETTA DEFINITIVA
+generate_expert_FINAL.py - VERSIONE CON WANDB LOGGING
 
 Fix applicati:
 1. Più Nash iterations (2000 invece di 1200)
 2. Più VI iterations (150 invece di 120)
 3. Validazione con ENTRAMBE le distribuzioni
 4. Salva P e R direttamente
+5. ✨ W&B logging completo
 """
 
 import numpy as np
@@ -13,6 +14,8 @@ import pickle
 from collections import defaultdict
 from tqdm import tqdm
 import time
+import wandb  # ← NUOVO
+import matplotlib.pyplot as plt  # ← NUOVO per plots
 
 from pettingzoo.mpe import simple_speaker_listener_v4
 from discrete_wrapper import DiscretizedSpeakerListenerWrapper
@@ -20,8 +23,8 @@ from utils import calc_exploitability_true
 
 # ============= CONFIG =============
 NUM_EPISODES_EXPLORATION = 20000
-NASH_ITERATIONS = 2000          # ⬆️ Aumentato da 1200
-VI_ITERATIONS = 150             # ⬆️ Aumentato da 120
+NASH_ITERATIONS = 2000
+VI_ITERATIONS = 150
 GAMMA = 0.9
 DISCRETIZATION_BINS = 6
 
@@ -36,14 +39,35 @@ NUM_LISTENER_STATES = 27 * (DISCRETIZATION_BINS ** 2)
 NUM_GOALS = 3
 S_DIM = NUM_GOALS * NUM_LISTENER_STATES
 
+# ============= WANDB SETUP =============
+wandb.init(
+    project="expert-nash-generation",
+    name=f"expert-bins{DISCRETIZATION_BINS}-{time.strftime('%Y%m%d-%H%M%S')}",
+    config={
+        "discretization_bins": DISCRETIZATION_BINS,
+        "num_states": S_DIM,
+        "gamma": GAMMA,
+        "nash_iterations": NASH_ITERATIONS,
+        "vi_iterations": VI_ITERATIONS,
+        "exploration_episodes": NUM_EPISODES_EXPLORATION,
+        "num_actions_speaker": A_SPEAKER,
+        "num_actions_listener": A_LISTENER,
+    },
+    tags=["expert-generation", "fictitious-play", "speaker-listener"],
+    notes=f"Nash equilibrium generation with bins={DISCRETIZATION_BINS}"
+)
+
+config = wandb.config
+
 print("="*70)
-print("🎯 GENERAZIONE ESPERTO BINS=6 - VERSIONE FINALE CORRETTA")
+print("🎯 GENERAZIONE ESPERTO BINS=6 - VERSIONE CON WANDB")
 print("="*70)
 print(f"✓ Bins: {DISCRETIZATION_BINS}")
 print(f"✓ Stati: {S_DIM}")
 print(f"✓ Nash iters: {NASH_ITERATIONS}")
 print(f"✓ VI iters: {VI_ITERATIONS}")
 print(f"✓ Tempo stimato: 50-60 minuti")
+print(f"📊 W&B Run: {wandb.run.get_url()}")
 print("="*70)
 
 
@@ -111,7 +135,7 @@ def value_iteration_robust(P_ind, R_ind, gamma, max_iter):
     return V, Q
 
 
-# ============= NASH SOLVER =============
+# ============= NASH SOLVER WITH WANDB =============
 class RobustNashSolver:
     def __init__(self, P, R, gamma, iterations):
         self.P = P.astype(np.float64)
@@ -132,7 +156,16 @@ class RobustNashSolver:
         update_every = max(1, self.iterations // 10)
         start_time = time.time()
         
+        # ← NOVO: Lista per tracking convergenza
+        nash_iterations = []
+        policy_changes_speaker = []
+        policy_changes_listener = []
+        
         for i in range(1, self.iterations + 1):
+            # Save old policies per tracking change
+            old_avg_pi_1 = avg_pi_1.copy()
+            old_avg_pi_2 = avg_pi_2.copy()
+            
             br_1 = self._best_response(avg_pi_2, player=1)
             br_2 = self._best_response(avg_pi_1, player=2)
             
@@ -140,13 +173,82 @@ class RobustNashSolver:
             avg_pi_1 = (1 - alpha) * avg_pi_1 + alpha * br_1
             avg_pi_2 = (1 - alpha) * avg_pi_2 + alpha * br_2
             
+            # ← NOVO: Compute policy change
+            change_pi_1 = np.mean(np.abs(avg_pi_1 - old_avg_pi_1))
+            change_pi_2 = np.mean(np.abs(avg_pi_2 - old_avg_pi_2))
+            
             if i % update_every == 0:
                 elapsed = time.time() - start_time
                 avg_time = elapsed / i
                 remaining = avg_time * (self.iterations - i)
                 print(f"      Iter {i}/{self.iterations} | {elapsed:.1f}s | ~{remaining:.1f}s left")
+                
+                # ← NOVO: Log to W&B
+                nash_iterations.append(i)
+                policy_changes_speaker.append(change_pi_1)
+                policy_changes_listener.append(change_pi_2)
+                
+                # Compute policy entropy (measure of determinism)
+                def policy_entropy(pi):
+                    pi_safe = np.clip(pi, 1e-10, 1.0)
+                    H = -np.sum(pi_safe * np.log(pi_safe), axis=1)
+                    return np.mean(H)
+                
+                entropy_1 = policy_entropy(avg_pi_1)
+                entropy_2 = policy_entropy(avg_pi_2)
+                
+                # Compute sparsity (determinism)
+                sparsity_1 = np.mean(np.max(avg_pi_1, axis=1) > 0.99)
+                sparsity_2 = np.mean(np.max(avg_pi_2, axis=1) > 0.99)
+                
+                wandb.log({
+                    "nash/iteration": i,
+                    "nash/policy_change_speaker": change_pi_1,
+                    "nash/policy_change_listener": change_pi_2,
+                    "nash/entropy_speaker": entropy_1,
+                    "nash/entropy_listener": entropy_2,
+                    "nash/sparsity_speaker": sparsity_1,
+                    "nash/sparsity_listener": sparsity_2,
+                    "nash/elapsed_seconds": elapsed,
+                    "nash/progress": i / self.iterations,
+                }, step=i)
         
-        print(f"   ✅ Nash done in {time.time() - start_time:.1f}s")
+        total_time = time.time() - start_time
+        print(f"   ✅ Nash done in {total_time:.1f}s")
+        
+        # ← NOVO: Log final Nash metrics
+        wandb.run.summary.update({
+            "nash/total_time_seconds": total_time,
+            "nash/iterations_completed": self.iterations,
+            "nash/final_entropy_speaker": policy_entropy(avg_pi_1),
+            "nash/final_entropy_listener": policy_entropy(avg_pi_2),
+        })
+        
+        # ← NOVO: Create convergence plot
+        if len(nash_iterations) > 0:
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+            
+            ax1.semilogy(nash_iterations, policy_changes_speaker, 'o-', label='Speaker', alpha=0.7)
+            ax1.semilogy(nash_iterations, policy_changes_listener, 's-', label='Listener', alpha=0.7)
+            ax1.set_xlabel('Iteration')
+            ax1.set_ylabel('Policy Change (log scale)')
+            ax1.set_title('Fictitious Play Convergence')
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
+            
+            ax2.plot(nash_iterations, policy_changes_speaker, 'o-', label='Speaker', alpha=0.7)
+            ax2.plot(nash_iterations, policy_changes_listener, 's-', label='Listener', alpha=0.7)
+            ax2.set_xlabel('Iteration')
+            ax2.set_ylabel('Policy Change')
+            ax2.set_title('Linear Scale')
+            ax2.legend()
+            ax2.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plt.savefig('nash_convergence.png', dpi=150, bbox_inches='tight')
+            wandb.log({"plots/nash_convergence": wandb.Image('nash_convergence.png')})
+            plt.close()
+        
         return avg_pi_1, avg_pi_2
 
     def _best_response(self, opp_policy, player):
@@ -227,6 +329,11 @@ def main():
     transitions = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
     rewards = defaultdict(lambda: defaultdict(float))
     visits = defaultdict(lambda: defaultdict(int))
+    
+    # ← NOVO: Track exploration metrics
+    episodes_completed = []
+    states_visited = []
+    unique_transitions = []
 
     for ep in tqdm(range(NUM_EPISODES_EXPLORATION), desc="Episodes"):
         obs, _ = env.reset()
@@ -251,11 +358,59 @@ def main():
             done = any(term.values()) or any(trunc.values())
             obs = next_obs
             steps += 1
+        
+        # ← NOVO: Log exploration progress every 1000 episodes
+        if (ep + 1) % 1000 == 0:
+            episodes_completed.append(ep + 1)
+            states_visited.append(len(transitions))
+            unique_transitions.append(sum(len(actions) for actions in transitions.values()))
+            
+            coverage = len(transitions) / S_DIM
+            
+            wandb.log({
+                "exploration/episodes": ep + 1,
+                "exploration/states_visited": len(transitions),
+                "exploration/coverage": coverage,
+                "exploration/unique_transitions": unique_transitions[-1],
+            }, step=ep + 1)
     
     env.close()
     
-    print(f"✅ Exploration: {time.time()-step_start:.1f}s")
-    print(f"   Coverage: {len(transitions)}/{S_DIM} ({100*len(transitions)/S_DIM:.1f}%)")
+    exploration_time = time.time() - step_start
+    coverage = len(transitions) / S_DIM
+    
+    print(f"✅ Exploration: {exploration_time:.1f}s")
+    print(f"   Coverage: {len(transitions)}/{S_DIM} ({100*coverage:.1f}%)")
+    
+    # ← NOVO: Log exploration summary
+    wandb.run.summary.update({
+        "exploration/time_seconds": exploration_time,
+        "exploration/final_coverage": coverage,
+        "exploration/states_visited": len(transitions),
+    })
+    
+    # ← NOVO: Plot exploration
+    if len(episodes_completed) > 0:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+        
+        ax1.plot(episodes_completed, states_visited, 'o-')
+        ax1.axhline(y=S_DIM, color='r', linestyle='--', label=f'Total states ({S_DIM})')
+        ax1.set_xlabel('Episodes')
+        ax1.set_ylabel('Unique States Visited')
+        ax1.set_title('Exploration Coverage')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        ax2.plot(episodes_completed, np.array(states_visited) / S_DIM, 'o-')
+        ax2.set_xlabel('Episodes')
+        ax2.set_ylabel('Coverage Fraction')
+        ax2.set_title('State Space Coverage')
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig('exploration_coverage.png', dpi=150, bbox_inches='tight')
+        wandb.log({"plots/exploration": wandb.Image('exploration_coverage.png')})
+        plt.close()
 
     # ========== BUILD MATRICES ==========
     print(f"\nSTEP 2: BUILD MATRICES")
@@ -264,8 +419,19 @@ def main():
     step_start = time.time()
     P, R = build_matrices_robust(transitions, rewards, visits, S_DIM, A_SPEAKER, A_LISTENER)
     
-    print(f"✅ Matrices: {time.time()-step_start:.1f}s")
+    matrix_time = time.time() - step_start
+    print(f"✅ Matrices: {matrix_time:.1f}s")
     print(f"   P: {P.shape}, R: {R.shape}")
+    
+    # ← NOVO: Log matrix statistics
+    wandb.log({
+        "matrices/build_time_seconds": matrix_time,
+        "matrices/reward_min": float(R.min()),
+        "matrices/reward_max": float(R.max()),
+        "matrices/reward_mean": float(R.mean()),
+        "matrices/reward_std": float(R.std()),
+        "matrices/transition_sparsity": float(np.mean(P == 0)),
+    })
     
     R = normalize_rewards(R)
 
@@ -313,7 +479,7 @@ def main():
         expert_dist = 0.9 * expert_dist + 0.1 * init_dist_uniform
         expert_dist = expert_dist / expert_dist.sum()
     
-    # *** CRITICAL: Test con ENTRAMBE le distribuzioni ***
+    # Test con ENTRAMBE le distribuzioni
     print("   🔍 Gap con distribuzione UNIFORME:")
     gap_expert_unif = calc_exploitability_true(pi_s, pi_l, R, P, init_dist_uniform, GAMMA)
     print(f"      Expert: {gap_expert_unif:.6f}")
@@ -322,7 +488,8 @@ def main():
     nu_unif = np.ones((S_DIM, A_LISTENER), dtype=np.float64) / A_LISTENER
     gap_uniform_unif = calc_exploitability_true(mu_unif, nu_unif, R, P, init_dist_uniform, GAMMA)
     print(f"      Uniform: {gap_uniform_unif:.6f}")
-    print(f"      Ratio: {gap_uniform_unif/gap_expert_unif:.1f}x")
+    ratio_unif = gap_uniform_unif / gap_expert_unif
+    print(f"      Ratio: {ratio_unif:.1f}x")
     
     print("\n   🔍 Gap con distribuzione EXPERT:")
     gap_expert_exp = calc_exploitability_true(pi_s, pi_l, R, P, expert_dist, GAMMA)
@@ -330,41 +497,119 @@ def main():
     
     gap_uniform_exp = calc_exploitability_true(mu_unif, nu_unif, R, P, expert_dist, GAMMA)
     print(f"      Uniform: {gap_uniform_exp:.6f}")
-    print(f"      Ratio: {gap_uniform_exp/gap_expert_exp:.1f}x")
+    ratio_exp = gap_uniform_exp / gap_expert_exp
+    print(f"      Ratio: {ratio_exp:.1f}x")
+    
+    # ← NOVO: Log validation results
+    wandb.log({
+        "validation/expert_gap_uniform_dist": gap_expert_unif,
+        "validation/uniform_gap_uniform_dist": gap_uniform_unif,
+        "validation/ratio_uniform_dist": ratio_unif,
+        "validation/expert_gap_expert_dist": gap_expert_exp,
+        "validation/uniform_gap_expert_dist": gap_uniform_exp,
+        "validation/ratio_expert_dist": ratio_exp,
+    })
 
     # ========== RESULTS ==========
     print("\n" + "="*70)
     print("📊 RISULTATI FINALI")
     print("="*70)
     
-    if gap_expert_exp < 0.1 and gap_uniform_exp / gap_expert_exp > 5:
+    success = gap_expert_exp < 0.1 and ratio_exp > 5
+    
+    if success:
         print("✅ SUCCESSO!")
         print(f"   Expert gap (d_expert): {gap_expert_exp:.6f}")
         print(f"   Uniform gap (d_expert): {gap_uniform_exp:.6f}")
-        print(f"   Ratio: {gap_uniform_exp/gap_expert_exp:.1f}x")
+        print(f"   Ratio: {ratio_exp:.1f}x")
+        
+        wandb.run.summary["status"] = "success"
+        wandb.alert(
+            title="Expert Generation Success",
+            text=f"Expert gap: {gap_expert_exp:.6f}, Ratio: {ratio_exp:.1f}x",
+            level=wandb.AlertLevel.INFO
+        )
     else:
         print("⚠️  RISULTATI SUBOTTIMALI:")
         print(f"   Expert gap: {gap_expert_exp:.6f} (target: <0.1)")
-        print(f"   Ratio: {gap_uniform_exp/gap_expert_exp:.1f}x (target: >5)")
+        print(f"   Ratio: {ratio_exp:.1f}x (target: >5)")
         print("\n   Possibili cause:")
         print("   - Nash iterations insufficienti")
         print("   - VI iterations insufficienti")
         print("   - Gioco intrinsecamente difficile")
+        
+        wandb.run.summary["status"] = "suboptimal"
+        wandb.alert(
+            title="Expert Generation Suboptimal",
+            text=f"Expert gap: {gap_expert_exp:.6f} (target <0.1), Ratio: {ratio_exp:.1f}x (target >5)",
+            level=wandb.AlertLevel.WARN
+        )
+    
+    # ← NOVO: Summary metrics
+    total_time = time.time() - total_start
+    
+    wandb.run.summary.update({
+        "final/expert_gap": gap_expert_exp,
+        "final/uniform_gap": gap_uniform_exp,
+        "final/ratio": ratio_exp,
+        "final/total_time_minutes": total_time / 60,
+        "final/success": success,
+    })
 
     # ========== SAVE =============
     print(f"\n💾 Saving...")
     np.save(OUTPUT_SPEAKER_POLICY, pi_s)
     np.save(OUTPUT_LISTENER_POLICY, pi_l)
     np.save(OUTPUT_INITIAL_DIST, expert_dist)
-    
-    # *** SALVA ANCHE P e R ***
     np.save('P_bins6.npy', P)
     np.save('R_bins6.npy', R)
     print(f"   ✓ Policies, distribution, P, R saved")
     
-    total_time = time.time() - total_start
+    # ← NOVO: Save as W&B artifacts
+    artifact = wandb.Artifact(
+        name=f'expert-policies-bins{DISCRETIZATION_BINS}',
+        type='model',
+        description=f'Expert Nash policies | Gap: {gap_expert_exp:.6f} | Ratio: {ratio_exp:.1f}x'
+    )
+    
+    artifact.add_file(OUTPUT_SPEAKER_POLICY)
+    artifact.add_file(OUTPUT_LISTENER_POLICY)
+    artifact.add_file(OUTPUT_INITIAL_DIST)
+    artifact.add_file('P_bins6.npy')
+    artifact.add_file('R_bins6.npy')
+    artifact.add_file(OUTPUT_DATA_FILE)
+    
+    wandb.log_artifact(artifact)
+    print(f"   ✓ Artifacts logged to W&B")
+    
+    # ← NOVO: Create final comparison plot
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    methods = ['Expert\n(d_expert)', 'Uniform\n(d_expert)', 'Expert\n(d_uniform)', 'Uniform\n(d_uniform)']
+    gaps = [gap_expert_exp, gap_uniform_exp, gap_expert_unif, gap_uniform_unif]
+    colors = ['green', 'red', 'lightgreen', 'lightcoral']
+    
+    bars = ax.bar(methods, gaps, color=colors, alpha=0.7, edgecolor='black')
+    ax.set_ylabel('Exploitability Gap', fontsize=12)
+    ax.set_title('Expert vs Uniform Policy - Gap Comparison', fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # Add value labels on bars
+    for bar, gap in zip(bars, gaps):
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height,
+                f'{gap:.4f}',
+                ha='center', va='bottom', fontsize=10, fontweight='bold')
+    
+    plt.tight_layout()
+    plt.savefig('expert_validation.png', dpi=150, bbox_inches='tight')
+    wandb.log({"plots/validation": wandb.Image('expert_validation.png')})
+    plt.close()
     
     print(f"\n✅ COMPLETATO IN {total_time/60:.1f} MINUTI")
+    print(f"📊 View results at: {wandb.run.get_url()}")
+    
+    wandb.finish()
 
 if __name__ == "__main__":
     main()
