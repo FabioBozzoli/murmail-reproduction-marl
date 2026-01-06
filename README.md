@@ -204,12 +204,4 @@ MIT License - See LICENSE file
 
 ---
 
-## 🙏 Acknowledgments
-
-- Prof. [Nome Professore] for course supervision
-- PettingZoo/Stable-Baselines3 communities
-- W&B for experiment tracking
-
----
-
 **Project Status:** ✅ Complete (January 2025)
