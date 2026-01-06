@@ -4,6 +4,7 @@
 *.zip
 *.pkl
 *.tex
+*.pth
 __pycache__/
 models/
 logs/
