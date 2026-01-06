@@ -10,7 +10,15 @@ models/
 logs/
 runs/
 wandb/
-
+analyze_language.py
+behavior_cloning.py
+compare_results.py
+diagnose.py
+env_wrappers.py
+estimate_dynamics.py
+fast_loader.py
+summary.md
+summary.pdf
 # Mac OS
 .DS_Store
 
