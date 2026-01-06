@@ -98,29 +98,6 @@ python scripts/compare_all.py
 
 ---
 
-## 📂 Repository Structure
-```
-.
-├── src/
-│   ├── murmail.py                   # MURMAIL implementation
-│   ├── baseline_joint_dqn.py        # Joint-DQN baseline
-│   ├── baseline_joint_sac.py        # Joint-SAC baseline
-│   ├── generate_expert_FINAL.py     # Nash equilibrium solver
-│   ├── utils.py                     # Exploitability calculation
-│   └── discrete_wrapper.py          # Environment discretization
-│
-├── results/
-│   ├── plots/
-│   │   ├── convergence_comparison.png
-│   │   └── communication_protocol.png
-│   └── metrics.json
-│
-├── requirements.txt
-└── README.md
-```
-
----
-
 ## 🧠 Methods
 
 ### Fictitious Play (Expert Generation)

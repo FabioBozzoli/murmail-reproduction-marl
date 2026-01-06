@@ -19,6 +19,7 @@ estimate_dynamics.py
 fast_loader.py
 summary.md
 summary.pdf
+pipeline.sh
 # Mac OS
 .DS_Store
 
