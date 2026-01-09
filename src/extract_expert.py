@@ -22,11 +22,11 @@ from discrete_wrapper import DiscretizedSpeakerListenerWrapper
 from utils import calc_exploitability_true
 
 # ============= CONFIG =============
-NUM_EPISODES_EXPLORATION = 20000
-NASH_ITERATIONS = 2000
+NUM_EPISODES_EXPLORATION = 50000
+NASH_ITERATIONS = 5000
 VI_ITERATIONS = 150
 GAMMA = 0.9
-DISCRETIZATION_BINS = 6
+DISCRETIZATION_BINS = 10
 
 OUTPUT_DATA_FILE = 'murmail_data_bins6.pkl'
 OUTPUT_SPEAKER_POLICY = 'expert_policy_speaker_bins6.npy'

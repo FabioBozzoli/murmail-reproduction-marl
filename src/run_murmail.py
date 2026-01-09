@@ -446,6 +446,18 @@ print("\n📦 Saving W&B artifacts...")
 np.save('murmail_policy_speaker_final.npy', p_s)
 np.save('murmail_policy_listener_final.npy', p_l)
 
+np.save('murmail_queries.npy', queries)
+np.save('murmail_exploit.npy', exploit)
+
+import pickle
+with open('murmail_results.pkl', 'wb') as f:
+    pickle.dump({
+        'queries': queries,
+        'exploit': exploit
+    }, f)
+
+print("   ✓ Saved: murmail_queries.npy, murmail_exploit.npy")
+
 # Create artifact
 artifact = wandb.Artifact(
     name=f'murmail-policies-{wandb.run.id}',

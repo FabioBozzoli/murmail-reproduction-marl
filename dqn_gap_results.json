@@ -1,0 +1,8 @@
+{
+  "dqn_gap": 0.2842552218753962,
+  "expert_gap": 0.008495647457856137,
+  "uniform_gap": 0.23088153337911166,
+  "improvement_from_uniform": -0.053373688496284544,
+  "improvement_percentage": -24.000483787529394,
+  "gap_ratio": 33.45892391197781
+}

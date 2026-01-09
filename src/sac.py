@@ -21,7 +21,7 @@ from tqdm import tqdm
 import time
 import wandb
 import matplotlib.pyplot as plt
-
+import pickle
 from pettingzoo.mpe import simple_speaker_listener_v4
 from discrete_wrapper import DiscretizedSpeakerListenerWrapper
 from utils import calc_exploitability_true
@@ -33,16 +33,16 @@ print("="*70)
 # ============= CONFIG =============
 DISCRETIZATION_BINS = 6
 NUM_EPISODES = 20000
-BATCH_SIZE = 256
-GAMMA = 0.9
+BATCH_SIZE = 256  # Ridotto
+GAMMA = 0.95      # Aumentato (come DQN)
 TAU = 0.005
 LR_ACTOR = 0.0003
 LR_CRITIC = 0.0003
 LR_ALPHA = 0.0003
 REPLAY_BUFFER_SIZE = 100000
-MIN_REPLAY_SIZE = 1000
+MIN_REPLAY_SIZE = 5000  # Aumentato
 EVAL_EVERY = 500
-TARGET_ENTROPY_SCALE = 0.05
+TARGET_ENTROPY_SCALE = 0.6  # Moderato
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -120,7 +120,8 @@ class JointActor(nn.Module):
         super().__init__()
         
         self.state_embedding = nn.Embedding(num_states, embed_dim)
-        
+        nn.init.normal_(self.state_embedding.weight, mean=0, std=0.01)  # ✅ Non zero!
+
         self.net = nn.Sequential(
             nn.Linear(embed_dim, hidden),
             nn.ReLU(),
@@ -159,7 +160,8 @@ class JointCritic(nn.Module):
         super().__init__()
         
         self.state_embedding = nn.Embedding(num_states, embed_dim)
-        
+        nn.init.normal_(self.state_embedding.weight, mean=0, std=0.01)  # ✅ Non zero!
+
         # Q1
         self.q1 = nn.Sequential(
             nn.Linear(embed_dim, hidden),
@@ -209,94 +211,84 @@ class ReplayBuffer:
         return len(self.buffer)
 
 # ============= JOINT SAC AGENT =============
+# ============= JOINT SAC AGENT (VERSIONE AUTO-TUNE CLAMPED) =============
 class JointSACAgent:
     def __init__(self, num_states, num_actions):
         self.num_states = num_states
         self.num_actions = num_actions
-        
-        # Networks
+
+        def init_weights(m):
+            if isinstance(m, nn.Linear):
+                torch.nn.init.orthogonal_(m.weight)
+                m.bias.data.fill_(0.01)
+
         self.actor = JointActor(num_states, num_actions).to(device)
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=LR_ACTOR)
-        
         self.critic = JointCritic(num_states, num_actions).to(device)
         self.critic_target = JointCritic(num_states, num_actions).to(device)
-        self.critic_target.load_state_dict(self.critic.state_dict())
+
+        self.actor.apply(init_weights)
+        self.critic.apply(init_weights)
+        self.critic_target.load_state_dict(self.critic.state_dict()) 
+
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=LR_ACTOR)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=LR_CRITIC)
         
-        # Temperature
+        # --- RIPRISTINATO AUTO-ALPHA ---
+        # Partiamo da un valore ragionevole, ma lasciamo che impari
         self.target_entropy = -TARGET_ENTROPY_SCALE * np.log(1.0 / num_actions)
-        self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
+        self.log_alpha = torch.tensor([np.log(0.1)], dtype=torch.float32, requires_grad=True, device=device)
         self.alpha_optimizer = optim.Adam([self.log_alpha], lr=LR_ALPHA)
         
-        # Replay buffer
         self.replay_buffer = ReplayBuffer(REPLAY_BUFFER_SIZE)
         
         print(f"✓ Target entropy: {self.target_entropy:.4f}")
-        
         wandb.watch(self.actor, log="all", log_freq=1000)
-        
-        total_params = sum(p.numel() for p in self.actor.parameters()) + \
-                      sum(p.numel() for p in self.critic.parameters())
-        wandb.config.update({"total_parameters": total_params})
-        print(f"✓ Total parameters: {total_params:,}")
-    
+
     @property
     def alpha(self):
         return self.log_alpha.exp()
     
+    # select_action rimane uguale...
     def select_action(self, joint_state, eval_mode=False):
-        """Select joint action"""
         state_t = torch.LongTensor([joint_state]).to(device)
-        
         if eval_mode:
-            # Deterministic (greedy)
             with torch.no_grad():
                 logits = self.actor(state_t)
                 action = logits.argmax(dim=1).item()
         else:
-            # Stochastic (sample from policy)
             with torch.no_grad():
                 logits = self.actor(state_t)
                 dist = Categorical(logits=logits)
                 action = dist.sample().item()
-        
         return action
-    
+
     def update(self):
-        """Discrete SAC update - NUMERICALLY STABLE VERSION"""
         if len(self.replay_buffer) < MIN_REPLAY_SIZE:
             return None
         
-        # Sample batch
         states, actions, rewards, next_states, dones = self.replay_buffer.sample(BATCH_SIZE)
         
-        states_t = torch.LongTensor(states).to(device)
-        actions_t = torch.LongTensor(actions).to(device)
-        rewards_t = torch.FloatTensor(rewards).to(device)
-        next_states_t = torch.LongTensor(next_states).to(device)
-        dones_t = torch.FloatTensor(dones).to(device)
+        # ✅ FIX: Forziamo dtype=torch.float32 per i float e torch.long per gli interi
+        states_t = torch.tensor(states, dtype=torch.long, device=device)
+        actions_t = torch.tensor(actions, dtype=torch.long, device=device)
+        rewards_t = torch.tensor(rewards, dtype=torch.float32, device=device)  # <--- Fondamentale
+        next_states_t = torch.tensor(next_states, dtype=torch.long, device=device)
+        dones_t = torch.tensor(dones, dtype=torch.float32, device=device)      # <--- Fondamentale
         
         # ========== CRITIC UPDATE ==========
         with torch.no_grad():
             next_logits = self.actor(next_states_t)
-            
-            # ✅ FIX: Clamp logits per evitare overflow in softmax
             next_logits = torch.clamp(next_logits, min=-20, max=20)
-            
             next_probs = F.softmax(next_logits, dim=1)
             next_log_probs = F.log_softmax(next_logits, dim=1)
-            
-            # ✅ FIX: Clamp probs per evitare log(0)
             next_probs = torch.clamp(next_probs, min=1e-8, max=1.0)
             next_log_probs = torch.clamp(next_log_probs, min=-20, max=0)
             
             next_q1_target, next_q2_target = self.critic_target(next_states_t)
             next_q_target = torch.min(next_q1_target, next_q2_target)
             
-            # V(s') = E[Q(s',a) - α log π(a|s')]
+            # Qui usiamo self.alpha (che ora è dinamico)
             next_v_target = (next_probs * (next_q_target - self.alpha * next_log_probs)).sum(dim=1)
-            
-            # ✅ FIX: Clamp value target
             next_v_target = torch.clamp(next_v_target, min=-100, max=100)
             
             q_target = rewards_t + GAMMA * (1 - dones_t) * next_v_target
@@ -307,72 +299,51 @@ class JointSACAgent:
         
         critic_loss = F.mse_loss(q1_pred, q_target) + F.mse_loss(q2_pred, q_target)
         
-        # ✅ FIX: Check for NaN in loss
-        if torch.isnan(critic_loss) or torch.isinf(critic_loss):
-            print("⚠️  NaN/Inf detected in critic_loss, skipping update")
-            return None
+        if torch.isnan(critic_loss): return None
         
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)  # ✅ Più conservativo
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
         self.critic_optimizer.step()
         
         # ========== ACTOR UPDATE ==========
         logits = self.actor(states_t)
-        
-        # ✅ FIX: Clamp logits
         logits = torch.clamp(logits, min=-20, max=20)
-        
         probs = F.softmax(logits, dim=1)
         log_probs = F.log_softmax(logits, dim=1)
-        
-        # ✅ FIX: Clamp probabilities
-        probs = torch.clamp(probs, min=1e-8, max=1.0)
-        log_probs = torch.clamp(log_probs, min=-20, max=0)
         
         with torch.no_grad():
             q1, q2 = self.critic(states_t)
             q_values = torch.min(q1, q2)
-            
-            # ✅ FIX: Clamp Q-values
-            q_values = torch.clamp(q_values, min=-100, max=100)
         
-        # Actor loss
-        inside_term = self.alpha.detach() * log_probs - q_values
+        # Actor loss usando self.alpha dinamico
+        inside_term = self.alpha * log_probs - q_values
         actor_loss = (probs * inside_term).sum(dim=1).mean()
         
-        # ✅ FIX: Check for NaN
-        if torch.isnan(actor_loss) or torch.isinf(actor_loss):
-            print("⚠️  NaN/Inf detected in actor_loss, skipping update")
-            return None
+        if torch.isnan(actor_loss): return None
         
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)  # ✅ Più conservativo
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
         self.actor_optimizer.step()
         
-        # ========== TEMPERATURE UPDATE ==========
+        # ========== TEMPERATURE UPDATE (RIPRISTINATO E CLAMPED) ==========
         with torch.no_grad():
             entropy = -(probs * log_probs).sum(dim=1).mean()
-            
-            # ✅ FIX: Clamp entropy
-            entropy = torch.clamp(entropy, min=0, max=10)
         
+        # Loss standard di SAC per alpha
         alpha_loss = -self.log_alpha * (entropy - self.target_entropy).detach()
-        
-        # ✅ FIX: Check for NaN
-        if torch.isnan(alpha_loss) or torch.isinf(alpha_loss):
-            print("⚠️  NaN/Inf detected in alpha_loss, skipping update")
-            return None
         
         self.alpha_optimizer.zero_grad()
         alpha_loss.backward()
         self.alpha_optimizer.step()
         
-        # ✅ FIX: Clamp log_alpha per evitare alpha troppo grandi
+        # 🔥 IL TRUCCO SALVAVITA: CLAMP SU LOG_ALPHA 🔥
+        # Impedisce che alpha esploda a 150.
+        # max=0.0 significa alpha max = e^0 = 1.0.
+        # min=-5.0 significa alpha min = e^-5 = 0.006.
         with torch.no_grad():
-            self.log_alpha.data = torch.clamp(self.log_alpha.data, min=-5, max=5)
-        
+            self.log_alpha.data = torch.clamp(self.log_alpha.data, min=-5.0, max=2.3)        
         # Soft update
         for target_param, param in zip(self.critic_target.parameters(), self.critic.parameters()):
             target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
@@ -384,7 +355,7 @@ class JointSACAgent:
             'alpha': self.alpha.item(),
             'mean_entropy': entropy.item(),
         }
-
+    
 # ============= EVALUATION =============
 def evaluate(agent, n_episodes=50):
     """Evaluate with deterministic policy"""
@@ -540,7 +511,7 @@ for episode in tqdm(range(1, NUM_EPISODES + 1), desc="Episodes"):
         done = any(terms.values()) or any(truncs.values())
         
         # Reward Scaling
-        raw_reward = rewards["speaker_0"] + rewards["listener_0"]
+        raw_reward = rewards["speaker_0"]
         
         # 1. Normalizza [-100, 0] -> [0, 1]
         norm_reward = (raw_reward + 100.0) / 100.0
@@ -550,8 +521,9 @@ for episode in tqdm(range(1, NUM_EPISODES + 1), desc="Episodes"):
         # Random (dist -50) -> 0.5^2 * 10 = 2.5
         # Perfect (dist 0)  -> 1.0^2 * 10 = 10.0
         # Delta = 7.5 (Molto forte!)
-        reward = (norm_reward ** 2) * 10.0 
-        
+        #reward = (norm_reward ** 2) * 10.0
+        reward = raw_reward / 100.0   
+        reward = np.clip(reward, -1.0, 0.0)
         episode_reward += raw_reward 
         
         agent.replay_buffer.push(joint_state, joint_action, reward, next_joint_state, done)
@@ -603,5 +575,26 @@ env.close()
 
 # Save results (rest of code similar to before)
 print(f"\n✅ Training Complete")
+
+# ============= SAVE RESULTS =============
+results = {
+    'eval_episodes': eval_episodes,
+    'eval_rewards': eval_rewards,
+    'eval_gaps': eval_gaps,
+    'episode_rewards': episode_rewards,
+    'config': {
+        'num_episodes': NUM_EPISODES,
+        'batch_size': BATCH_SIZE,
+        'gamma': GAMMA,
+        'lr_actor': LR_ACTOR,
+        'target_entropy_scale': TARGET_ENTROPY_SCALE
+    }
+}
+
+# Salva con lo stesso nome che cerca il plotter
+with open('joint_sac_results.pkl', 'wb') as f:
+    pickle.dump(results, f)
+
+print("\n💾 Results saved to joint_sac_results.pkl")
 
 wandb.finish()
