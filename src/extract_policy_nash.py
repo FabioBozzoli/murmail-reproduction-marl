@@ -7,10 +7,8 @@ from torch.distributions import Categorical
 # ================= CONFIGURAZIONE =================
 BINS = 6
 HIDDEN_SIZE = 128
-# Qui metti il nome del file che hai nella cartella
 FILENAME = "mappo_final_converged_checkpoint.pth" 
 BACKUP_FILENAME = "mappo_backup_fixed_checkpoint.pth"
-
 DEVICE = torch.device("cpu")
 # ==================================================
 
@@ -23,8 +21,17 @@ class DiscreteActor(nn.Module):
         x = self.embed(obs)
         return Categorical(logits=self.policy(x))
 
+def smooth_policy(probs, epsilon=0.05):
+    """
+    Mescola la policy (95%) con un rumore uniforme (5%)
+    per renderla robusta a piccole discrepanze nel modello.
+    """
+    n_actions = probs.shape[1]
+    uniform = np.ones_like(probs) / n_actions
+    return (1 - epsilon) * probs + epsilon * uniform
+
 def fix_and_export():
-    print("🔧 FIX EXPORT TOOL per MAPPO")
+    print("🔧 FIX EXPORT TOOL per MAPPO (con Smoothing)")
     
     # 1. Trova il file giusto
     if os.path.exists(FILENAME):
@@ -71,13 +78,18 @@ def fix_and_export():
     probs_l_local = np.concatenate(probs_l_list, axis=0)
     probs_l_expanded = np.tile(probs_l_local, (3, 1))
 
-    # 5. SALVATAGGIO
-    np.save("mappo_final_converged_probs_speaker.npy", probs_s_expanded)
-    np.save("mappo_final_converged_probs_listener.npy", probs_l_expanded)
+    # 5. SMOOTHING (Il trucco magico)
+    print("🍦 Applying Smoothing (epsilon=0.05)...")
+    probs_s_final = smooth_policy(probs_s_expanded)
+    probs_l_final = smooth_policy(probs_l_expanded)
 
-    print("\n✅ DONE! File salvati.")
-    print(f"   Speaker Shape: {probs_s_expanded.shape}")
-    print(f"   Listener Shape: {probs_l_expanded.shape}")
+    # 6. SALVATAGGIO
+    np.save("mappo_final_converged_probs_speaker.npy", probs_s_final)
+    np.save("mappo_final_converged_probs_listener.npy", probs_l_final)
+
+    print("\n✅ DONE! File salvati (Smoothed).")
+    print(f"   Speaker Shape: {probs_s_final.shape}")
+    print(f"   Listener Shape: {probs_l_final.shape}")
 
 if __name__ == "__main__":
     fix_and_export()

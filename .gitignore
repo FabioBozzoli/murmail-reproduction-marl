@@ -5,6 +5,8 @@
 *.pkl
 *.tex
 *.pth
+*.csv
+*
 __pycache__/
 models/
 logs/

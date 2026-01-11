@@ -31,8 +31,8 @@ FILES = {
         "l": "dqn_policy_listener.npy"
     },
     "MuRMAIL": {
-        "s": "murmail_policy_speaker.npy",
-        "l": "murmail_policy_listener.npy"
+        "s": "murmail_policy_speaker_final.npy",
+        "l": "murmail_policy_listener_final.npy"
     }
 }
 
