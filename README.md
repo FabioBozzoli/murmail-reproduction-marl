@@ -127,7 +127,19 @@ This highlights a clear **stability–performance trade-off**:
 python generate_expert.py
 ```
 
-2. Run final evaluation:
+2. Run Murmail:
+
+```bash
+python run_murmail.py
+```
+
+3. Run Mappo:
+
+```bash
+python ppo.py
+```
+
+4. Run final evaluation:
 
 ```bash
 python final_analysis_cont.py
