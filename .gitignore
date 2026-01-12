@@ -1,6 +1,7 @@
 *.npy
 *.npz
 *.png
+!final_thesis_plot.png
 *.zip
 *.pkl
 *.tex
