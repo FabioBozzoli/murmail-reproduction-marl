@@ -23,6 +23,7 @@ fast_loader.py
 summary.md
 summary.pdf
 pipeline.sh
+render.py
 # Mac OS
 .DS_Store
 
