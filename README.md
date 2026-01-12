@@ -22,6 +22,7 @@ Rather than evaluating agents solely on reward maximization, we analyze how diff
 * **Episode length**: 25 steps
 
 This is a **team game**, not zero-sum:
+
 $$
 R_{\text{speaker}} = R_{\text{listener}}
 $$
@@ -45,12 +46,12 @@ $$
 
 We compute a **Nash-style exploitability metric** adapted to cooperative games:
 
-[
+$$
 \text{Gap} =
 V(\text{BR}_S, \pi_L) +
 V(\pi_S, \text{BR}_L) -
 2V(\pi_S, \pi_L)
-]
+$$
 
 * Measures **how much a single agent can improve the team reward by deviating unilaterally**
 * Gap = 0 ⇒ **stable joint policy**
@@ -145,4 +146,3 @@ This project demonstrates that **MuRMAIL is effective at learning stable coopera
 
 The results emphasize the importance of **equilibrium-aware evaluation** in multi-agent reinforcement learning, especially in cooperative settings.
 
----
