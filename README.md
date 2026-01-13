@@ -73,88 +73,84 @@ $$
 
 ### 📊 Quantitative Comparison
 
-| Method      | Nash Gap ↓ | Avg Reward |
-| ----------- | ---------- | ---------- |
-| **Expert**  | 0.009      | -25.90     |
+| Method      | Nash Gap ↓ <br>*(Strategic Instability)* | Avg Reward ↑ <br>*(Empirical Performance)* |
+| ----------- | :---: | :---: |
+| **Expert**  | **0.009**      | -25.90     |
 | **MuRMAIL** | 0.058      | -26.71     |
+| MAPPO       | 0.320      | **-25.24**     |
 | Random      | 0.191      | -39.55     |
-| MAPPO       | 0.320      | -25.24     |
 
 ### 🔍 Interpretation
 
-* **Expert** achieves near-zero exploitability → highly stable joint policy
-* **MuRMAIL** closely matches the Expert, inheriting its stability
-* **MAPPO** obtains higher reward but is **strategically unstable**
-* **Random** performs poorly and is unstable, as expected
+The results reveal a critical insight into Multi-Agent learning dynamics:
 
-> **Higher reward does not necessarily imply higher strategic stability.**
+1.  **Performance Parity:** Both the **Expert** (Game-Theoretic) and **MAPPO** (Deep RL) converge to the same performance ceiling (~ -25). This represents the physical limit of the discretized environment.
+2.  **The Hidden Flaw:** Despite achieving the same reward, **MAPPO has a high Nash Gap (0.320)**, while the Expert is near zero (0.009).
+3.  **MuRMAIL's Success:** MuRMAIL successfully clones the Expert's behavior, achieving **both** high reward (-26.71) and high stability (0.058), bridging the gap between RL and Game Theory.
+
+> **Crucial Finding:** High empirical reward does **not** guarantee a Nash Equilibrium. MAPPO learns an effective but **strategically fragile** policy, while MuRMAIL inherits the **robustness** of the Expert.
 
 ---
 
 ## Visualization
 
-The final plot jointly represents:
+The final analysis plots the relationship between theoretical stability and practical performance:
 
-* **X-axis**: Nash Exploitability (lower = more stable)
-* **Y-axis**: Average Reward (higher = better performance)
-
-This highlights a clear **stability–performance trade-off**:
-
-* **Expert / MuRMAIL** → stable but conservative
-* **MAPPO** → high reward but exploitable
+*   **X-axis**: Nash Exploitability Gap (Lower is Better/More Stable)
+*   **Y-axis**: Average Reward (Higher is Better)
 
 <p align="center">
   <img src="final_thesis_plot.png" width="600">
 </p>
 
+**Analysis of the Plot:**
+*   **Expert & MAPPO** are aligned on the Y-axis (Performance).
+*   However, they are far apart on the X-axis (Stability).
+*   This visualizes the **"Hidden Cost" of Deep RL**: achieving the goal without ensuring equilibrium.
+
 ---
 
 ## Key Takeaways
 
-* MuRMAIL **successfully imitates a stable expert policy**
-* Stability and performance are **distinct objectives**
-* Model-free MARL methods may exploit environment dynamics at the cost of equilibrium stability
-* Nash-style exploitability is a **meaningful metric even in cooperative games**
-
+*   **Reward is Insufficient:** Evaluating cooperative agents solely on Average Reward hides strategic vulnerabilities.
+*   **Robustness via Imitation:** MuRMAIL proves that imitation learning is a viable path to inject game-theoretic stability into neural policies.
+*   **Sim-to-Model Alignment:** The convergence of Expert and MAPPO rewards confirms that the discrete model ($P, R$) and the continuous environment are now correctly aligned.
 
 ---
 
 ## Reproducibility
 
-1. Generate the expert model:
+To reproduce these results, follow the pipeline:
 
-```bash
-python generate_expert.py
-```
+1.  **Generate the Expert (Nash Solver):**
+    ```bash
+    python generate_expert_FINAL.py
+    ```
+    *Generates transition matrices P, R and solves for Nash policies.*
 
-2. Run Murmail:
+2.  **Train Imitation Agent (MuRMAIL):**
+    ```bash
+    python run_murmail.py
+    ```
 
-```bash
-python run_murmail.py
-```
+3.  **Train Deep RL Agent (MAPPO):**
+    ```bash
+    python ppo.py
+    ```
 
-3. Run Mappo:
+4.  **Run Final Comparative Analysis:**
+    ```bash
+    python final_analysis_cont.py
+    ```
 
-```bash
-python ppo.py
-```
-
-4. Run final evaluation:
-
-```bash
-python final_analysis_cont.py
-```
-
-Outputs:
-
-* `final_thesis_plot.png`
-* `final_thesis_table.csv`
+**Outputs:**
+*   `final_thesis_plot.png` (Visualization)
+*   `final_thesis_table.csv` (Raw Data)
 
 ---
 
 ## Conclusion
 
-This project demonstrates that **MuRMAIL is effective at learning stable cooperative policies**, even when higher-reward but unstable alternatives exist.
+This project demonstrates that while standard Deep MARL algorithms (like MAPPO) can solve complex coordination tasks empirically, they fail to converge to a **Nash Equilibrium**, leaving them potentially vulnerable or non-robust.
 
-The results emphasize the importance of **equilibrium-aware evaluation** in multi-agent reinforcement learning, especially in cooperative settings.
-
+**MuRMAIL** offers a solution: by imitating a derived equilibrium, we can obtain policies that are both **effective in practice** and **theoretically sound**.
