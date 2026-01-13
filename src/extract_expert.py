@@ -274,7 +274,7 @@ class RobustNashSolver:
                     for a1 in range(self.A1):
                         weight = opp_policy[s, a1]
                         P_ind[a2, s, :] += self.P[s, a1, a2, :] * weight
-                        R_ind[s, a2] -= self.R[s, a1, a2] * weight
+                        R_ind[s, a2] += self.R[s, a1, a2] * weight
             
             n_actions = self.A2
         
@@ -358,6 +358,8 @@ def main():
             done = any(term.values()) or any(trunc.values())
             obs = next_obs
             steps += 1
+            if steps == 0 and ep % 1000 == 0:
+                 print(f"DEBUG REWARD RAW: {rew_dict['speaker_0']}")
         
         # ← NOVO: Log exploration progress every 1000 episodes
         if (ep + 1) % 1000 == 0:

@@ -1,167 +1,226 @@
-"""
-compare_all_gaps.py - UNIVERSAL BENCHMARK
-
-Confronta tutti gli algoritmi (MAPPO, DQN, MURMAIL, EXPERT) 
-sullo stesso terreno di gioco (Dinamiche 6 Bins).
-"""
-
 import numpy as np
-import json
+import torch
+import torch.nn as nn
+from torch.distributions import Categorical
 import matplotlib.pyplot as plt
+import pandas as pd
 import os
-import time
-from utils import calc_exploitability_true
+from discrete_wrapper import DiscretizedSpeakerListenerWrapper
+from utils import calc_exploitability_true 
 
-# ============= CONFIG =============
-GAMMA = 0.9
+# ================= CONFIGURAZIONE =================
 BINS = 6
+EPISODES = 500       # Numero di episodi per la media empirica
+DEVICE = torch.device("cpu") # O "cuda"
+GAMMA = 0.9
 
-# Nomi dei file attesi (modifica se i tuoi sono diversi)
+# Nomi file
 FILES = {
-    "Expert (Nash)": {
-        "s": f"expert_policy_speaker_bins{BINS}.npy",
-        "l": f"expert_policy_listener_bins{BINS}.npy"
-    },
-    "MAPPO": {
-        "s": f"mappo_final_converged_probs_speaker.npy", # O quello che hai esportato
-        "l": f"mappo_final_converged_probs_listener.npy"
-    },
-    "Joint-DQN": {
-        "s": "dqn_policy_speaker.npy",
-        "l": "dqn_policy_listener.npy"
-    },
-    "MuRMAIL": {
-        "s": "murmail_policy_speaker_final.npy",
-        "l": "murmail_policy_listener_final.npy"
-    }
-}
-
-DYNAMICS_FILES = {
+    # DINAMICHE (Servono solo per il Gap)
     "P": f"P_bins{BINS}.npy",
-    "R": f"R_bins{BINS}.npy",
-    "init": f"expert_initial_dist_bins{BINS}.npy"
+    "R_norm": f"R_bins{BINS}.npy",       
+    "Init": f"expert_initial_dist_bins{BINS}.npy",
+    
+    # POLICIES
+    "Expert_S": f"expert_policy_speaker_bins{BINS}.npy",
+    "Expert_L": f"expert_policy_listener_bins{BINS}.npy",
+    "MURMAIL_S": "murmail_policy_speaker_final.npy",
+    "MURMAIL_L": "murmail_policy_listener_final.npy",
+    
+    # CHECKPOINT MAPPO
+    "MAPPO_Ckpt": "mappo_final_converged_checkpoint.pth" 
+    # Se hai salvato i file numpy di MAPPO, puoi caricare anche quelli, 
+    # ma il checkpoint è meglio per la valutazione empirica.
 }
 
-# ============= LOAD DYNAMICS =============
-print("="*70)
-print(f"📊 UNIVERSAL BENCHMARK (BINS={BINS})")
-print("="*70)
+# ================= CLASSI DEEP RL =================
+class DiscreteActor(nn.Module):
+    def __init__(self, obs_dim, act_dim, hidden=128):
+        super().__init__()
+        self.embed = nn.Embedding(obs_dim, hidden)
+        self.policy = nn.Sequential(nn.Linear(hidden, hidden), nn.Tanh(), nn.Linear(hidden, act_dim))
+    def forward(self, obs):
+        x = self.embed(obs)
+        return Categorical(logits=self.policy(x))
 
-print("\n📂 Loading Environment Dynamics...")
-try:
-    P = np.load(DYNAMICS_FILES["P"]).astype(np.float64)
-    R = np.load(DYNAMICS_FILES["R"]).astype(np.float64)
-    init_dist = np.load(DYNAMICS_FILES["init"]).astype(np.float64)
-    print(f"✓ Loaded P: {P.shape}, R: {R.shape}")
-except FileNotFoundError as e:
-    print(f"❌ CRITICAL ERROR: Dynamics file not found: {e}")
-    print(f"   Run 'generate_expert_FINAL.py' first to create P/R matrices for bins={BINS}.")
-    exit(1)
+def get_uniform_policy(n_states, n_actions):
+    return np.ones((n_states, n_actions)) / n_actions
 
-# ============= HELPER FUNCTION =============
-def get_uniform_policy(num_states, num_actions):
-    return np.ones((num_states, num_actions)) / num_actions
-
-# ============= MAIN LOOP =============
-results = {}
-
-print("\n🚀 Starting Evaluation Loop...")
-
-# 1. Evaluate UNIFORM Baseline first
-print(f"\n🔹 Evaluating: Random Uniform")
-try:
-    s_dim, a_s_dim, a_l_dim, _ = P.shape
-    pi_s_unif = get_uniform_policy(s_dim, a_s_dim)
-    pi_l_unif = get_uniform_policy(s_dim, a_l_dim)
-    gap = calc_exploitability_true(pi_s_unif, pi_l_unif, R, P, init_dist, GAMMA)
-    results["Uniform"] = gap
-    print(f"   Gap: {gap:.6f}")
-except Exception as e:
-    print(f"   ❌ Failed: {e}")
-
-# 2. Evaluate all other algorithms
-for name, files in FILES.items():
-    print(f"\n🔹 Evaluating: {name}")
-    
-    # Check if files exist
-    if not os.path.exists(files["s"]) or not os.path.exists(files["l"]):
-        print(f"   ⚠️  Skipping: Policy files not found ({files['s']})")
-        continue
-        
+# ================= CARICAMENTO DATI =================
+def load_data():
+    print("📂 Caricamento Dati...")
+    data = {}
     try:
-        # Load
-        pi_s = np.load(files["s"])
-        pi_l = np.load(files["l"])
+        # Carichiamo solo ciò che serve per il Gap
+        data["P"] = np.load(FILES["P"])
+        data["R_norm"] = np.load(FILES["R_norm"]) 
+        data["Init"] = np.load(FILES["Init"])
         
-        # Validation shapes
-        if pi_s.shape[0] != P.shape[0]:
-            print(f"   ⚠️  Shape Mismatch! Env States: {P.shape[0]}, Policy States: {pi_s.shape[0]}")
-            print("       (Did you mix 6-bin policies with 10-bin dynamics?)")
-            continue
-
-        # Compute Gap
-        start = time.time()
-        gap = calc_exploitability_true(pi_s, pi_l, R, P, init_dist, GAMMA)
-        elapsed = time.time() - start
+        # Policy Tabellari
+        data["Pi_Exp_S"] = np.load(FILES["Expert_S"])
+        data["Pi_Exp_L"] = np.load(FILES["Expert_L"])
         
-        results[name] = gap
-        print(f"   Gap: {gap:.6f} (Computed in {elapsed:.1f}s)")
-        
-    except Exception as e:
-        print(f"   ❌ Error computing gap: {e}")
+        if os.path.exists(FILES["MURMAIL_S"]):
+            data["Pi_Mur_S"] = np.load(FILES["MURMAIL_S"])
+            data["Pi_Mur_L"] = np.load(FILES["MURMAIL_L"])
+        else:
+            print("⚠️ MuRMAIL non trovato, verrà saltato.")
 
-# ============= RANKING & PLOT =============
-print("\n" + "="*70)
-print("🏆 FINAL RANKING (Lower is Better)")
-print("="*70)
+        print("✅ Dati caricati.")
+    except FileNotFoundError as e:
+        print(f"❌ ERRORE: {e}")
+        exit()
+    return data
 
-# Sort by gap (ascending)
-sorted_res = sorted(results.items(), key=lambda x: x[1])
-
-expert_gap = results.get("Expert (Nash)", 0.0)
-uniform_gap = results.get("Uniform", 1.0)
-improvement_range = uniform_gap - expert_gap
-
-stats = []
-
-for rank, (name, gap) in enumerate(sorted_res, 1):
-    # Calculate % improvement over random
-    if improvement_range > 0:
-        score = 100 * (uniform_gap - gap) / improvement_range
-    else:
-        score = 0.0
-        
-    print(f"{rank}. {name:20s} Gap: {gap:.6f} | Score: {score:5.1f}% (0=Random, 100=Expert)")
+# ================= 1. CALCOLO NASH GAP (TEORICO) =================
+def compute_gaps(data):
+    print("\n🧮 Calcolo Nash Gaps (su Reward Normalizzato)...")
+    results = {}
     
-    stats.append({
-        "name": name,
-        "gap": gap,
-        "score": score
-    })
+    # Lista algoritmi tabellari disponibili
+    targets = [("Expert", data["Pi_Exp_S"], data["Pi_Exp_L"])]
+    if "Pi_Mur_S" in data:
+        targets.append(("MuRMAIL", data["Pi_Mur_S"], data["Pi_Mur_L"]))
+    
+    for name, pi_s, pi_l in targets:
+        gap = calc_exploitability_true(pi_s, pi_l, data["R_norm"], data["P"], data["Init"], GAMMA)
+        results[name] = gap
+        print(f"   🔹 {name} Gap: {gap:.6f}")
+    
+    # Random Uniform Baseline
+    s_dim = data["P"].shape[0]
+    u_s = get_uniform_policy(s_dim, 3)
+    u_l = get_uniform_policy(s_dim, 5)
+    gap = calc_exploitability_true(u_s, u_l, data["R_norm"], data["P"], data["Init"], GAMMA)
+    results["Random"] = gap
+    print(f"   🔹 Random Gap: {gap:.6f}")
+    
+    # Nota: Il Gap di MAPPO è difficile da calcolare esattamente se non hai estratto 
+    # la policy tabellare (probability matrix) dalla rete neurale. 
+    # Se hai i file .npy di MAPPO, aggiungili qui. Altrimenti lo stimiamo o lo omettiamo nel plot teorico.
+    results["MAPPO"] = np.nan # Placeholder se non abbiamo la matrice NxAxA
+    
+    return results
 
-# ============= SAVE JSON =============
-with open(f"benchmark_results_bins{BINS}.json", "w") as f:
-    json.dump(stats, f, indent=2)
-print(f"\n💾 Saved detailed stats to benchmark_results_bins{BINS}.json")
+# ================= 2. CALCOLO REWARD (EMPIRICO UNIFICATO) =================
+def eval_all_agents_on_env(data):
+    print(f"\n🎮 Valutazione Empirica ({EPISODES} episodi) - Tutti sullo stesso Environment...")
+    env = DiscretizedSpeakerListenerWrapper(bins=BINS)
+    results = {}
+    
+    # --- A. AGENTI TABELLARI (Expert, MuRMAIL) ---
+    tabular_agents = [("Expert", data["Pi_Exp_S"], data["Pi_Exp_L"])]
+    if "Pi_Mur_S" in data:
+        tabular_agents.append(("MuRMAIL", data["Pi_Mur_S"], data["Pi_Mur_L"]))
+        
+    for name, pi_s, pi_l in tabular_agents:
+        r_log = []
+        for _ in range(EPISODES):
+            obs_dict, _ = env.reset()
+            obs_s, obs_l = obs_dict["speaker_0"], obs_dict["listener_0"]
+            ep_r = 0
+            for _ in range(25):
+                # Campioniamo dall'array di probabilità
+                act_s = np.random.choice(len(pi_s[obs_s]), p=pi_s[obs_s])
+                act_l = np.random.choice(len(pi_l[obs_l]), p=pi_l[obs_l])
+                
+                obs_dict, rews, terms, truncs, _ = env.step({"speaker_0": act_s, "listener_0": act_l})
+                ep_r += rews["listener_0"] # RAW REWARD dall'env
+                
+                obs_s, obs_l = obs_dict["speaker_0"], obs_dict["listener_0"]
+                if any(terms.values()) or any(truncs.values()): break
+            r_log.append(ep_r)
+        results[name] = np.mean(r_log)
+        print(f"   🔹 {name}: {results[name]:.2f}")
 
-# ============= PLOT =============
-names = [x["name"] for x in stats]
-gaps = [x["gap"] for x in stats]
-colors = ['green' if 'Expert' in n else 'grey' if 'Uniform' in n else 'skyblue' for n in names]
+    # --- B. AGENTE RANDOM ---
+    r_log = []
+    for _ in range(EPISODES):
+        env.reset(); ep_r = 0
+        for _ in range(25):
+            _, r, t, _, _ = env.step({"speaker_0": np.random.randint(0,3), "listener_0": np.random.randint(0,5)})
+            ep_r += r["listener_0"]
+            if any(t.values()): break
+        r_log.append(ep_r)
+    results["Random"] = np.mean(r_log)
+    print(f"   🔹 Random: {results['Random']:.2f}")
 
-plt.figure(figsize=(10, 6))
-bars = plt.bar(names, gaps, color=colors, edgecolor='black', alpha=0.7)
+    # --- C. AGENTE MAPPO (Deep RL) ---
+    # Qui usiamo os.path (Libreria OS)
+    if os.path.exists(FILES["MAPPO_Ckpt"]):
+        OBS_L_DIM = BINS**2 * 27 
+        agent_s = DiscreteActor(3, 3).to(DEVICE)
+        agent_l = DiscreteActor(OBS_L_DIM, 5).to(DEVICE)
+        
+        try:
+            ckpt = torch.load(FILES["MAPPO_Ckpt"], map_location=DEVICE)
+            agent_s.load_state_dict(ckpt['actor_s'])
+            agent_l.load_state_dict(ckpt['actor_l'])
+            
+            r_log = []
+            for _ in range(EPISODES):
+                obs, _ = env.reset(); ep_r = 0
+                for _ in range(25):
+                    with torch.no_grad():
+                        # ✅ FIX: Rinominate variabili per evitare conflitto con 'import os'
+                        t_os = torch.tensor([obs["speaker_0"]], device=DEVICE)
+                        t_ol = torch.tensor([obs["listener_0"]], device=DEVICE)
+                        
+                        as_ = agent_s(t_os).logits.argmax().item()
+                        al_ = agent_l(t_ol).logits.argmax().item()
+                        
+                    obs, r, t, _, _ = env.step({"speaker_0": as_, "listener_0": al_})
+                    ep_r += r["listener_0"]
+                    if any(t.values()): break
+                r_log.append(ep_r)
+            results["MAPPO"] = np.mean(r_log)
+            print(f"   🔹 MAPPO:  {results['MAPPO']:.2f}")
+        except Exception as e:
+            print(f"   ⚠️ MAPPO Load Error: {e}")
+            results["MAPPO"] = np.nan
+    else:
+        results["MAPPO"] = np.nan
 
-plt.ylabel('Exploitability Gap (Lower is Better)')
-plt.title(f'Multi-Agent Algorithm Benchmark (Bins={BINS})')
-plt.grid(axis='y', linestyle='--', alpha=0.3)
+    return results
+# ================= REPORT FINALE =================
+def make_final_report(gaps, rewards):
+    print("\n" + "="*60)
+    print("📊 REPORT FINALE UNIFICATO")
+    print("="*60)
+    
+    # Creiamo DataFrame
+    df_data = {}
+    for name in rewards.keys():
+        df_data[name] = {
+            "Gap (Lower Better)": gaps.get(name, np.nan),
+            "Reward (Higher Better)": rewards.get(name, np.nan)
+        }
+    
+    df = pd.DataFrame.from_dict(df_data, orient='index')
+    print(df)
+    df.to_csv("thesis_results.csv")
+    
+    # Plot
+    plt.figure(figsize=(10, 7))
+    colors = {"Expert": "green", "MAPPO": "orange", "Random": "grey", "MuRMAIL": "purple"}
+    
+    for name, row in df.iterrows():
+        g, r = row["Gap (Lower Better)"], row["Reward (Higher Better)"]
+        if np.isnan(g) or np.isnan(r): continue
+        
+        plt.scatter(g, r, s=200, c=colors.get(name, "blue"), label=name, edgecolors="black")
+        plt.annotate(f"{name}\n{r:.1f}", (g, r), xytext=(5, 5), textcoords='offset points')
 
-# Labels
-for bar, gap in zip(bars, gaps):
-    plt.text(bar.get_x() + bar.get_width()/2, bar.get_height(), f'{gap:.4f}', 
-             ha='center', va='bottom', fontweight='bold')
+    plt.xlabel("Nash Exploitability Gap")
+    plt.ylabel("Average Episode Reward (Raw)")
+    plt.title(f"Performance vs Robustness (Bins={BINS})")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.savefig("thesis_plot_final.png")
+    print("\n✅ Plot salvato come thesis_plot_final.png")
 
-plt.tight_layout()
-plt.savefig(f"benchmark_plot_bins{BINS}.png", dpi=150)
-print(f"📊 Saved comparison plot to benchmark_plot_bins{BINS}.png")
-print("✅ DONE.")
+if __name__ == "__main__":
+    d = load_data()
+    gaps = compute_gaps(d)
+    rewards = eval_all_agents_on_env(d) # Unica funzione per tutti!
+    make_final_report(gaps, rewards)
